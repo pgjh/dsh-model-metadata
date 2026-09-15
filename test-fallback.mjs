@@ -105,6 +105,8 @@ function loadProviders() {
 					{ id: "probe/DeepSeek-V4-Flash-Vision", name: "probe/DeepSeek-V4-Flash-Vision" },
 					/* a model only the models.dev fixture knows */
 					{ id: "probe/zephyr-9-pro", name: "probe/zephyr-9-pro" },
+					/* an aggregator/catalog disagreement: the catalog must win */
+					{ id: "probe/longcat-2.0", name: "probe/longcat-2.0" },
 					/* a model nothing anywhere describes */
 					{ id: "probe/unknown-model-x", name: "probe/unknown-model-x" },
 					{ id: "deepseek-v4-flash", name: "deepseek-v4-flash" }

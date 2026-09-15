@@ -96,6 +96,12 @@ expect("plugin: the alias gets the official route's own effort levels", rowOf(pl
 expect("plugin: the dotted v4.1 spelling matches the same model", rowOf(plugin, "probe/deepseek-v4.1-flash").contextWindow, 1000000);
 expect("plugin: a name missing the catalog's -exp suffix still matches", rowOf(plugin, "probe/DeepSeek-V4-Flash-Vision").input, ["text", "image"]);
 expect("plugin: the models.dev tier covers a model no bundled catalog has", rowOf(plugin, "probe/zephyr-9-pro").contextWindow, 900000);
+/*
+ * Aggregators mirror other people's catalogs, so a catalog route that carries
+ * the same name must outrank them (opencode-go says 1000000 for longcat-2.0,
+ * openrouter's own entry says 1048756 and wins).
+ */
+expect("plugin: a catalog route outranks the aggregator for the same name", rowOf(plugin, "probe/longcat-2.0").contextWindow, 1048756);
 expect("plugin: a model nothing describes keeps the route default", rowOf(plugin, "probe/unknown-model-x").contextWindow, 262144);
 expect("plugin: a model nothing describes offers no levels", rowOf(plugin, "probe/unknown-model-x").reasoning, []);
 expect("plugin: the route's own api is kept", glm.api, "openai-responses");
