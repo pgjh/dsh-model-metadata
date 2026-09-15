@@ -104,6 +104,12 @@ expect("plugin: the models.dev tier covers a model no bundled catalog has", rowO
 expect("plugin: a catalog route outranks the aggregator for the same name", rowOf(plugin, "probe/longcat-2.0").contextWindow, 1048756);
 expect("plugin: a model nothing describes keeps the route default", rowOf(plugin, "probe/unknown-model-x").contextWindow, 262144);
 expect("plugin: a model nothing describes offers no levels", rowOf(plugin, "probe/unknown-model-x").reasoning, []);
+/*
+ * Hy/hunyuan has no vendor route of its own — only opencode-go carries it — so
+ * the aggregator stays that family's upstream: a bare `hy4-preview` must not
+ * fall to the same-named entries other catalogs hold.
+ */
+expect("plugin: the hy family keeps its aggregator upstream", rowOf(plugin, "probe/hy4-preview").contextWindow, 1024000);
 expect("plugin: the route's own api is kept", glm.api, "openai-responses");
 expect("plugin: the route's own baseUrl is kept", glm.baseUrl, "http://127.0.0.1:1/v1");
 expect("plugin: catalog cost is not copied in", glm.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });

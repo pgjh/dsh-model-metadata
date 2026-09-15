@@ -97,7 +97,7 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 | 每天 | 超过 24 小时算过期 |
 | 手动 | 跑 `lib/refresh-snapshot.mjs`，立刻生效、不用重启 |
 
-数据存在 **`$DSH_HOME/models-dev-snapshot.json`**（约 571 KB，机器上只此一份，所有 profile 共用）。放这里是有意的：更新插件会替换整个插件目录，数据若跟着插件走就会被一起丢掉、下次启动还得重下一遍；放在 DSH home 里，**更新插件完全不会碰它，也不用等下载**。装好第一次启动时如果还没有数据，它会自己下载一份（约 5 MB，几秒钟）。想换位置就用 `DSH_PI_AI_CATALOG_SNAPSHOT` 指到别处。
+数据存在 **`$DSH_HOME/models-dev-snapshot.json`**（当前约 0.6 MB，随 models.dev 数据量增长；机器上只此一份，所有 profile 共用）。放这里是有意的：更新插件会替换整个插件目录，数据若跟着插件走就会被一起丢掉、下次启动还得重下一遍；放在 DSH home 里，**更新插件完全不会碰它，也不用等下载**。装好第一次启动时如果还没有数据，它会自己下载一份（约 5 MB，几秒钟）。想换位置就用 `DSH_PI_AI_CATALOG_SNAPSHOT` 指到别处。
 
 ### 开关（环境变量，按需）
 
@@ -126,7 +126,7 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
   4. 目录里的名字多一个 `-exp` / `-latest` / `-preview` / `-free` 后缀也算——`DeepSeek-V4-Flash-Vision` 对上 `deepseek-v4-flash-vision-exp`。
 - 查的顺序（先查到的赢）：模型自家厂商的**官方**路由（glm→智谱、kimi→月之暗面、deepseek→**官方 `deepseek-official` 路由自己的目录**、gpt→openai、claude→anthropic…）→ DSH 内置目录（pi-ai）的其余部分 → opencode 聚合器 → models.dev 快照。官方目录在 `@deepseek-ai/dsh-llm-deepseek` 里，不翻 pi-ai 目录就查不到它——所以这一路是单独去问的（你在 `llm-deepseek` 设置段里改过的目录也会被用上）；聚合器是转抄别人目录的，所以永远排在正经目录后面，只用来补缺。
 - **新加的网关不用注册任何东西**，加完就能认；官方路由新出的型号在 models.dev 跟上之前，也能靠官方目录先对上。
-- 名字是自己编的（比如 `my-gateway/internal-model-v3`），哪里都没有 → 界面写「无匹配」，自己填即可。
+- 名字是自己编的（比如 `my-gateway/internal-model-v3`），哪里都没有 → 界面写「无匹配」，自己填即可。若目录里有同家族的其它型号（比如你写了 `doubao-seedream-5-lite`，目录里有一堆 `doubao-seed-*`），「无匹配」那行会把它们列出来供参考——但**不会自动拿来当元数据**，写法对不上就是没把握，宁缺毋滥。
 
 ## 常见问题
 

@@ -109,6 +109,8 @@ function loadProviders() {
 					{ id: "probe/longcat-2.0", name: "probe/longcat-2.0" },
 					/* a model nothing anywhere describes */
 					{ id: "probe/unknown-model-x", name: "probe/unknown-model-x" },
+					/* the hy family's own upstream is the opencode-go aggregator */
+					{ id: "probe/hy4-preview", name: "probe/hy4-preview" },
 					{ id: "deepseek-v4-flash", name: "deepseek-v4-flash" }
 				]
 			}

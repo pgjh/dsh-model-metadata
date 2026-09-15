@@ -42,13 +42,15 @@ const providers = {
 	}
 };
 const inspect = (id) => id === "probe/qwen-3.8-max"
-	? { id, candidates: [], cataloguedUnder: [], chosen: undefined }
+	? { id, candidates: [], cataloguedUnder: [], chosen: undefined, nearby: [{ id: "qwen3.8-max-plus", route: "qwen-token-plan", source: "pi-ai-catalog", contextWindow: 262144 }] }
 	: { id, candidates: [], cataloguedUnder: [], chosen: { route: id === "probe/glm-5.3" ? "zai" : "zai-coding-cn", source: "pi-ai-catalog", contextWindow: 1000000, maxTokens: 131072, reasoning: true, input: ["text", "image"] } };
 
 const matrix = panel.buildMatrix(providers, inspect);
 expect("matrix lists the configured route", matrix.routes.map((route) => route.route), ["my-gateway"]);
 expect("matrix lists every model", matrix.routes[0].models.map((row) => row.id), ["probe/glm-5.3", "probe/glm-5v-turbo", "probe/qwen-3.8-max"]);
 expect("an unmatched model is reported as unmatched", matrix.routes[0].models[2].matched, undefined);
+expect("an unmatched model carries its near neighbours for the hint line", [matrix.routes[0].models[2].nearby?.[0]?.id, matrix.routes[0].models[2].nearby?.length], ["qwen3.8-max-plus", 1]);
+expect("a matched model carries no near-neighbour noise", matrix.routes[0].models[0].nearby, undefined);
 expect("a matched model carries its verdict and source", [matrix.routes[0].models[1].matched.route, matrix.routes[0].models[1].matched.input], ["zai-coding-cn", ["text", "image"]]);
 expect("nothing is declared yet", matrix.routes[0].models[0].declared, {});
 expect("the stored entry travels with the row", matrix.routes[0].models[1].stored.compat, { supportsStore: false });
