@@ -1,0 +1,28 @@
+# Synthetic settings document for test-fallback.mjs: proves explicit declarations
+# win over borrowed metadata. Every model name here is real enough to match the
+# installed catalog (glm-5.3 -> zai, gpt-5.4 -> openai, kimi-k3 -> moonshotai).
+llm-pi-ai:
+  providers:
+    my-gateway:
+      displayName: my-gateway
+      api: openai-responses
+      baseURL: http://127.0.0.1:1/v1
+      models:
+        # bare declaration: everything may be borrowed
+        - id: probe/glm-5.3
+          name: probe/glm-5.3
+        # explicit capacities and an explicit "this model does not reason"
+        - id: probe/gpt-5.4
+          name: probe/gpt-5.4
+          contextWindow: 64000
+          maxTokens: 8000
+          reasoningEfforts: false
+        # explicit level subset: only these two levels may be offered
+        - id: probe/kimi-k3
+          name: probe/kimi-k3
+          reasoningEfforts:
+            low: low
+            high: high
+        # nothing in any catalog: stays on the route defaults
+        - id: probe/deepseek-v4.1-flash
+          name: probe/deepseek-v4.1-flash

@@ -1,0 +1,4 @@
+node_modules/
+*.tgz
+# test scratch directories (each suite removes its own, but a crashed run may leave one)
+tests/.*/

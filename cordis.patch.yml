@@ -1,0 +1,9 @@
+# This package's bundle patch. It is what makes the install one command: a profile
+# that lists this package in `dsh.profile.bundles` — or that simply has the package
+# installed — gets the plugin row below, with no manual editing of the profile.
+#
+# The `name` resolves from the profile's own node_modules, which is where
+# `dsh plugin --profile <name> add <this package>` puts it.
+- insert:
+    - id: dsh-model-metadata
+      name: dsh-model-metadata

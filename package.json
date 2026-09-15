@@ -1,0 +1,69 @@
+{
+  "name": "dsh-model-metadata",
+  "version": "0.1.2",
+  "description": "Capability metadata for hand-declared gateway models, resolved at runtime by bare model name (context window, output cap, reasoning levels, vision) — matched against the installed pi-ai catalog, opencode and models.dev, without writing to your settings.",
+  "author": "mx_ (https://www.npmjs.com/~mx_)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pgjh/dsh-model-metadata.git"
+  },
+  "homepage": "https://github.com/pgjh/dsh-model-metadata#readme",
+  "bugs": {
+    "url": "https://github.com/pgjh/dsh-model-metadata/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./lib/index.mjs",
+  "exports": {
+    ".": "./lib/index.mjs",
+    "./client": "./lib/client.js",
+    "./refresh-snapshot": "./lib/refresh-snapshot.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.mjs",
+    "lib/client.js",
+    "lib/panel.mjs",
+    "lib/snapshot.mjs",
+    "lib/refresh-snapshot.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-models"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "llm",
+    "model-metadata",
+    "models.dev",
+    "context-window",
+    "reasoning-effort",
+    "vision",
+    "custom-provider"
+  ],
+  "scripts": {
+    "verify": "node verify.mjs",
+    "test": "node verify.mjs && node tests/panel.mjs && node tests/hot-snapshot.mjs && node tests/refresh-policy.mjs"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  }
+}
