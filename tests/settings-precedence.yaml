@@ -23,6 +23,7 @@ llm-pi-ai:
           reasoningEfforts:
             low: low
             high: high
-        # nothing in any catalog: stays on the route defaults
+        # matches the official deepseek catalog under the relaxed spelling:
+        # borrowed freely, nothing here declares anything
         - id: probe/deepseek-v4.1-flash
           name: probe/deepseek-v4.1-flash

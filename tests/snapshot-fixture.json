@@ -4,21 +4,21 @@
   "providers": 1,
   "count": 2,
   "models": {
-    "deepseek-v4.1-flash": {
+    "zephyr-9-pro": {
       "provider": "fixture-vendor",
-      "name": "DeepSeek V4.1 Flash",
-      "contextWindow": 1000000,
-      "maxTokens": 384000,
+      "name": "Zephyr 9 Pro",
+      "contextWindow": 900000,
+      "maxTokens": 123456,
       "input": ["text", "image"],
       "reasoning": true
     },
-    "Qwen3.8-Max": {
+    "zephyr-9-air": {
       "provider": "fixture-vendor",
-      "name": "Qwen3.8 Max",
-      "contextWindow": 1000000,
-      "maxTokens": 65536,
-      "input": ["text", "image"],
-      "reasoning": true
+      "name": "Zephyr 9 Air",
+      "contextWindow": 400000,
+      "maxTokens": 65432,
+      "input": ["text"],
+      "reasoning": false
     }
   }
 }

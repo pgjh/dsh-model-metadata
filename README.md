@@ -40,7 +40,7 @@ llm-pi-ai:
 
 ## 插件做的事
 
-1. **按模型名查**：取 id 里最后一个 `/` 后面的名字（`my-gateway/gpt-4o` → `gpt-4o`），依次找 DSH 内置目录、opencode、models.dev 快照，查到之后，就把这个模型该有的上下文长度、输出上限、推理等级、图片支持补上去。
+1. **按模型名查**：取 id 里最后一个 `/` 后面的名字（`my-gateway/gpt-4o` → `gpt-4o`），依次找模型自家厂商的目录（deepseek 家族连官方 `deepseek-official` 路由自己的目录一起问）、opencode、DSH 内置目录、models.dev 快照，查到之后，就把这个模型该有的上下文长度、输出上限、推理等级、图片支持补上去。名字的写法差一点也没关系：`deepseek-v41-flash`、`deepseek-v4.1-flash`、"DeepSeek-V41-Flash" 算同一个名字，显示名和 `-exp` 之类的后缀也能对上（详见下面「哪些名字认得出」）。
 2. **只补缺的**：你在 `settings.yaml` 里亲手写过的字段，它不动。
 3. **界面上给你两个开关**：推理等级、视觉。DSH 官方界面没有这两个控件，这里是唯一的图形入口；改完点「写入」固定下来，不点就一直跟着目录走。
 4. **目录数据自己更新**：启动、打开界面、每天各检查一次 models.dev，所以新模型不用你手动管。
@@ -81,7 +81,7 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
   自动匹配：anthropic · 200K / 输出 64K · 有推理等级 · 视觉
   ```
 
-  写「无匹配」就是这个名字两处目录都没有，需要你自己填。
+  写「无匹配」就是这个名字哪里的目录都没有，需要你自己填。
 - 改动之后才会出现「**写入**」按钮：只写这一行的两个字段，其它内容原样保留。
 
 ### 容量为什么不在这个界面里改
@@ -119,10 +119,14 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 ## 哪些名字认得出
 
 - 只看**最后一个 `/` 后面的名字**：`my-gateway/gpt-4o` 和 `other-gateway/gpt-4o` 一样好使，网关叫什么不影响。
-- 名字完全一样就命中；只有大小写不同时，再试一次全小写。
-- 查的顺序：模型自家厂商的目录（glm→智谱、kimi→月之暗面、deepseek、gpt→openai、claude→anthropic…）→ opencode → DSH 自带目录的其余部分 → models.dev 快照。
-- **新加的网关不用注册任何东西**，加完就能认。
-- 名字是自己编的（比如 `my-gateway/internal-model-v3`），两处目录都不会有 → 界面写「无匹配」，自己填即可。
+- 名字怎么算一样，按顺序试：
+  1. 完全一样，或只有大小写不同；
+  2. 忽略 `.`、`-`、`_` 和空格再比一次——`deepseek-v41-flash`、`deepseek-v4.1-flash`、"DeepSeek V41 Flash" 都读作同一个名字（网关别名差的基本就是这点写法）；
+  3. **显示名也算数**——官方 DeepSeek 路由把 V41 flash 叫 `deepseek-flash`、显示成 "DeepSeek-V41-Flash"，按显示名就能对上；
+  4. 目录里的名字多一个 `-exp` / `-latest` / `-preview` / `-free` 后缀也算——`DeepSeek-V4-Flash-Vision` 对上 `deepseek-v4-flash-vision-exp`。
+- 查的顺序：模型自家厂商的目录（glm→智谱、kimi→月之暗面、deepseek→**官方 `deepseek-official` 路由自己的目录**、gpt→openai、claude→anthropic…）→ opencode → DSH 自带目录的其余部分 → models.dev 快照。官方目录在 `@deepseek-ai/dsh-llm-deepseek` 里，不翻 pi-ai 目录就查不到它——所以这一路是单独去问的（你在 `llm-deepseek` 设置段里改过的目录也会被用上）。
+- **新加的网关不用注册任何东西**，加完就能认；官方路由新出的型号在 models.dev 跟上之前，也能靠官方目录先对上。
+- 名字是自己编的（比如 `my-gateway/internal-model-v3`），哪里都没有 → 界面写「无匹配」，自己填即可。
 
 ## 常见问题
 

@@ -99,9 +99,14 @@ function loadProviders() {
 					{ id: "miclprobe/mimo-v2.5", name: "miclprobe/mimo-v2.5" },
 					{ id: "probe/minimax-m3", name: "probe/minimax-m3" },
 					{ id: "probe/glm-5v-turbo", name: "probe/glm-5v-turbo" },
+					/* the official deepseek route's V41 flash, in its three spellings */
 					{ id: "probe/deepseek-v4.1-flash", name: "probe/deepseek-v4.1-flash" },
-					{ id: "probe/qwen-3.8-max", name: "probe/qwen-3.8-max" },
-					{ id: "probe/Qwen3.8-Max", name: "probe/Qwen3.8-Max" },
+					{ id: "probe/deepseek-v41-flash", name: "probe/deepseek-v41-flash" },
+					{ id: "probe/DeepSeek-V4-Flash-Vision", name: "probe/DeepSeek-V4-Flash-Vision" },
+					/* a model only the models.dev fixture knows */
+					{ id: "probe/zephyr-9-pro", name: "probe/zephyr-9-pro" },
+					/* a model nothing anywhere describes */
+					{ id: "probe/unknown-model-x", name: "probe/unknown-model-x" },
 					{ id: "deepseek-v4-flash", name: "deepseek-v4-flash" }
 				]
 			}

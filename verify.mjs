@@ -84,10 +84,20 @@ expect("plugin: glm-5.3 matches zai, context window filled in", glm.contextWindo
 expect("plugin: glm-5.3 matches zai, output cap filled in", glm.maxTokens, 131072);
 expect("plugin: glm-5.3 matches zai, reasoning levels filled in", glm.reasoning, ["low", "high", "max"]);
 expect("plugin: upstream wins for gpt-5.4 (openai, not azure)", rowOf(plugin, "probe/gpt-5.4").contextWindow, 272000);
-expect("plugin: aggregator covers a model its vendor lacks (minimax-m3)", rowOf(plugin, "probe/minimax-m3").contextWindow, 512000);
-expect("plugin: the models.dev tier covers a model no bundled catalog has", rowOf(plugin, "probe/deepseek-v4.1-flash").contextWindow, 1000000);
-expect("plugin: a model nothing describes keeps the route default", rowOf(plugin, "probe/qwen-3.8-max").contextWindow, 262144);
-expect("plugin: a model nothing describes offers no levels", rowOf(plugin, "probe/qwen-3.8-max").reasoning, []);
+expect("plugin: the vendor's own catalog answers by display name (minimax-m3)", [rowOf(plugin, "probe/minimax-m3").contextWindow, rowOf(plugin, "probe/minimax-m3").maxTokens], [1048576, 512000]);
+/*
+ * The official deepseek-official route keeps its catalog in its own package, so
+ * the chain must consult it explicitly: the V41 flash's three spellings — the
+ * route's display name "DeepSeek-V41-Flash", the models.dev id
+ * deepseek-v4.1-flash, and the undotted alias — all name one model.
+ */
+expect("plugin: the official deepseek catalog answers the v41 alias", rowOf(plugin, "probe/deepseek-v41-flash").contextWindow, 1000000);
+expect("plugin: the alias gets the official route's own effort levels", rowOf(plugin, "probe/deepseek-v41-flash").reasoning, ["off", "low", "high", "max"]);
+expect("plugin: the dotted v4.1 spelling matches the same model", rowOf(plugin, "probe/deepseek-v4.1-flash").contextWindow, 1000000);
+expect("plugin: a name missing the catalog's -exp suffix still matches", rowOf(plugin, "probe/DeepSeek-V4-Flash-Vision").input, ["text", "image"]);
+expect("plugin: the models.dev tier covers a model no bundled catalog has", rowOf(plugin, "probe/zephyr-9-pro").contextWindow, 900000);
+expect("plugin: a model nothing describes keeps the route default", rowOf(plugin, "probe/unknown-model-x").contextWindow, 262144);
+expect("plugin: a model nothing describes offers no levels", rowOf(plugin, "probe/unknown-model-x").reasoning, []);
 expect("plugin: the route's own api is kept", glm.api, "openai-responses");
 expect("plugin: the route's own baseUrl is kept", glm.baseUrl, "http://127.0.0.1:1/v1");
 expect("plugin: catalog cost is not copied in", glm.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
@@ -108,14 +118,16 @@ expect("declared: the rest of that model is still filled in", rowOf(declared, "p
  */
 expect("input: the chain decides images by default", rowOf(plugin, "probe/glm-5v-turbo").input, ["text", "image"]);
 expect("input: a text-only upstream keeps the model text-only", rowOf(plugin, "probe/glm-5.3").input, ["text"]);
+expect("input: the official route's own vision model declares image", rowOf(plugin, "probe/deepseek-v41-flash").input, ["text", "image"]);
 const noInput = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "off" });
 expect("input=off: no modality is filled in", rowOf(noInput, "probe/glm-5v-turbo").input, ["text"]);
 const withInput = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "on" });
 expect("input=on: a vision model declares image", rowOf(withInput, "probe/glm-5v-turbo").input, ["text", "image"]);
-expect("input=on: a models.dev-only claim is honoured too", rowOf(withInput, "probe/Qwen3.8-Max").input, ["text", "image"]);
+expect("input=on: a models.dev-only claim is honoured too", rowOf(withInput, "probe/zephyr-9-pro").input, ["text", "image"]);
 const bundledOnly = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "bundled" });
 expect("input=bundled: the shipped catalog's claim still applies", rowOf(bundledOnly, "probe/glm-5v-turbo").input, ["text", "image"]);
-expect("input=bundled: a models.dev-only claim is ignored", rowOf(bundledOnly, "probe/Qwen3.8-Max").input, ["text"]);
+expect("input=bundled: the official deepseek catalog counts as shipped", rowOf(bundledOnly, "probe/deepseek-v41-flash").input, ["text", "image"]);
+expect("input=bundled: a models.dev-only claim is ignored", rowOf(bundledOnly, "probe/zephyr-9-pro").input, ["text"]);
 
 /*
  * Scenario 5: packaging invariants. Two of them are load-bearing enough to be
