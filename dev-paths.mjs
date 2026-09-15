@@ -25,16 +25,55 @@ function libRoots() {
 	const home = process.env.HOME ?? "";
 	const dshHome = process.env.DSH_HOME ?? join(home, ".dsh");
 	const configured = process.env.DSH_INSTALL;
-	const roots = [];
+	const candidates = [];
 	/* A DSH_INSTALL that points at the package itself is used verbatim; a lib dir is a root. */
 	if (configured !== undefined && configured.length > 0) {
-		roots.push(existsSync(join(configured, "package.json")) ? dirname(configured) : configured);
+		candidates.push(existsSync(join(configured, "package.json")) ? dirname(configured) : configured);
 	}
-	roots.push(join(dirname(process.execPath), "..", "lib"));
-	roots.push(join(dshHome, "profiles"));
-	roots.push("/usr/local/lib");
-	roots.push("/usr/lib");
-	return [...new Set(roots)];
+	candidates.push(join(dirname(process.execPath), "..", "lib"));
+	candidates.push(join(dshHome, "profiles"));
+	/*
+	 * A version manager's own install, as a `lib` directory. The tree inside the
+	 * installed package is what {@link expandRoots} adds — the old code pointed at
+	 * `<…>/dsh/node_modules` directly, which could never match the lookup below,
+	 * because a root is always searched through *its* `node_modules`.
+	 */
+	const nvm = join(home, ".nvm", "versions", "node");
+	if (existsSync(nvm)) {
+		for (const version of readdirSync(nvm)) candidates.push(join(nvm, version, "lib"));
+	}
+	candidates.push("/usr/local/lib");
+	candidates.push("/usr/lib");
+	return expandRoots(candidates);
+}
+
+/**
+ * Expand candidate roots with the dependency tree a package install keeps inside its
+ * own directory.
+ *
+ * A DSH installed from a published tarball carries its dependencies *nested*:
+ * `<lib>/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai`. Only
+ * a hoisted install puts the adapter beside the package, so searching
+ * `<root>/node_modules/` alone finds a npm/pnpm profile install but not a global one —
+ * which is exactly how the tools behaved on a machine where DSH came from
+ * `npm install -g` and nothing had ever been installed into a DSH profile.
+ * @param candidates - `lib` directories to expand, most specific first.
+ * @returns those roots plus, for each one that holds a DSH package, that package's own
+ * `node_modules` directory.
+ */
+export function expandRoots(candidates) {
+	const roots = [];
+	const add = (dir) => {
+		if (typeof dir !== "string" || dir.length === 0) return;
+		if (!roots.includes(dir)) roots.push(dir);
+	};
+	for (const candidate of candidates) {
+		if (typeof candidate !== "string" || candidate.length === 0) continue;
+		add(candidate);
+		const installed = join(candidate, "node_modules", "@deepseek-ai", "dsh");
+		if (existsSync(join(installed, "package.json"))) add(installed);
+	}
+	return roots;
 }
 
 /**

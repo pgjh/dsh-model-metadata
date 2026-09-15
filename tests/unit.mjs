@@ -24,10 +24,11 @@
  * writes is a snapshot round-tripped through JSON inside a scratch directory
  * taken from the OS and removed again on every exit path.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { expandRoots } from "../dev-paths.mjs";
 import { NAME_SUFFIXES, MIN_NORMALIZED_LENGTH, bareName, normalizeName, normalizedKeys } from "../lib/names.mjs";
 import { SNAPSHOT_URL, fetchModelsDevSnapshot, fetchModelsDevSnapshotIfChanged, flattenModelsDev, looksNonChat } from "../lib/snapshot.mjs";
 import { applyChoice, buildMatrix, buildOps } from "../lib/panel.mjs";
@@ -414,6 +415,35 @@ const firstRow = { id: "route-a/alpha" };
 const secondRow = { id: "route-a/beta" };
 expect("one save writes the whole model array of one route, as given", [buildOps("route-a", [firstRow, secondRow]), buildOps("route-a", [firstRow])[0].value[0] === firstRow], [[{ op: "set", path: ["providers", "route-a", "models"], value: [firstRow, secondRow] }], true]);
 expect("an emptied catalog still writes an array", buildOps("route-a", []), [{ op: "set", path: ["providers", "route-a", "models"], value: [] }]);
+
+
+/* ------------------------------------------------------------------- dev paths */
+
+/*
+ * Where the tools look for the DSH packages, which is the one thing that made the
+ * whole test suite unrunnable on a machine whose DSH came from `npm install -g`:
+ * a published package keeps its dependencies *nested* inside its own directory, so
+ * `<lib>/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai`
+ * is a root of its own — and searching only `<root>/node_modules/` never sees it.
+ */
+const layout = mkdtempSync(join(tmpdir(), "dsh-mm-layout-"));
+try {
+	const lib = join(layout, "prefix", "lib");
+	const nested = join(lib, "node_modules", "@deepseek-ai", "dsh", "node_modules", "@deepseek-ai", "dsh-llm-pi-ai");
+	mkdirSync(nested, { recursive: true });
+	writeFileSync(join(lib, "node_modules", "@deepseek-ai", "dsh", "package.json"), "{}");
+	writeFileSync(join(nested, "package.json"), "{}");
+	const expanded = expandRoots([lib]);
+	expect("a nested install is offered as a root of its own", expanded.includes(join(lib, "node_modules", "@deepseek-ai", "dsh")), true);
+	expect("and the adapter the tools need is found through it", existsSync(join(join(lib, "node_modules", "@deepseek-ai", "dsh"), "node_modules", "@deepseek-ai", "dsh-llm-pi-ai", "package.json")), true);
+	/* The candidate itself comes first: a hoisted install beside it must win. */
+	expect("the root is searched before the tree inside the package", expanded.indexOf(lib) < expanded.indexOf(join(lib, "node_modules", "@deepseek-ai", "dsh")), true);
+	expect("nothing is invented for a root with no DSH in it", expandRoots([join(layout, "empty")]), [join(layout, "empty")]);
+	expect("an empty or absent candidate is dropped rather than searched", expandRoots(["", undefined]), []);
+	expect("a repeated candidate is listed once", expandRoots([lib, lib]), expandRoots([lib]));
+} finally {
+	rmSync(layout, { recursive: true, force: true });
+}
 
 /* ---------------------------------------------------------------------- done */
 

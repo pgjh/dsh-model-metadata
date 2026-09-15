@@ -7,3 +7,7 @@ node_modules/
 tests/.browser-profile*/
 tests/.live-refresh/
 tests/.newroute/
+
+# The audit this 0.2.0 round came from: a working record, kept out of the published
+# repository on purpose. It stays in the checkout, untracked.
+OPTIMIZATION-AUDIT.md
