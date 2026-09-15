@@ -42,7 +42,13 @@ jobs:
       # (node-pty, koffi) — prefer adding `continue-on-error: true` to the step below and
       # leaving the hermetic step above as the gate, rather than dropping the step.
       - name: Install the public DSH package
-        run: npm install -g @deepseek-ai/dsh
+        run: |
+          npm install -g @deepseek-ai/dsh
+          # Where it landed, for the tools *and* for the plugin: a published install keeps
+          # its dependencies nested inside the dsh package, and nothing in this repository
+          # can infer the runner's prefix from its own path. `dirname` of npm's global root
+          # is the `lib` directory holding `node_modules`, the shape DSH_INSTALL accepts.
+          echo "DSH_INSTALL=$(dirname "$(npm root -g)")" >> "$GITHUB_ENV"
 
       - name: Full suite against the installed DSH
         run: npm test

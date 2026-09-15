@@ -27,7 +27,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 import { expandRoots } from "../dev-paths.mjs";
 import { NAME_SUFFIXES, MIN_NORMALIZED_LENGTH, bareName, normalizeName, normalizedKeys } from "../lib/names.mjs";
 import { SNAPSHOT_URL, fetchModelsDevSnapshot, fetchModelsDevSnapshotIfChanged, flattenModelsDev, looksNonChat } from "../lib/snapshot.mjs";
@@ -443,6 +444,44 @@ try {
 	expect("a repeated candidate is listed once", expandRoots([lib, lib]), expandRoots([lib]));
 } finally {
 	rmSync(layout, { recursive: true, force: true });
+}
+
+/* ----------------------------------------------------- roots the plugin itself uses */
+
+/*
+ * The plugin resolves the vendor packages from its own list of roots, and it has to
+ * cope with both shapes a DSH install takes: nested inside the dsh package (a global
+ * or published install) and hoisted beside it (a profile install). A wrong guess here
+ * does not degrade — it disables the entire fallback — so the shapes are pinned.
+ *
+ * The import runs in a child with no reachable DSH on purpose: that is the case a CI
+ * runner is in, and the module must still load and report rather than throw.
+ */
+const hermetic = mkdtempSync(join(tmpdir(), "dsh-mm-hermetic-"));
+try {
+	const pluginUrl = pathToFileURL(join(HERE, "..", "lib", "index.mjs")).href;
+	const probe = spawnSync(process.execPath, ["--input-type=module", "-e", `
+		const module = await import(${JSON.stringify(pluginUrl)});
+		const lib = "/tmp/prefix/lib";
+		console.log(JSON.stringify({
+			loaded: typeof module.apply === "function",
+			lib: module.installRoots(lib),
+			pkg: module.installRoots("/tmp/prefix/lib/node_modules/@deepseek-ai/dsh"),
+			empty: module.installRoots(undefined)
+		}));
+	`], {
+		encoding: "utf8",
+		env: { ...process.env, HOME: hermetic, DSH_HOME: hermetic, DSH_INSTALL: "", DSH_CATALOG_FALLBACK_NODE_MODULES: "", DSH_PI_AI_CATALOG_REFRESH: "0", DSH_PI_AI_CATALOG_SNAPSHOT: join(hermetic, "snapshot.json") }
+	});
+	const report = probe.stdout === undefined || probe.stdout.trim() === "" ? undefined : JSON.parse(probe.stdout.trim().split("\n").pop());
+	expect("the plugin module loads with no DSH install anywhere", report?.loaded, true);
+	expect("a lib directory offers its node_modules", report?.lib?.[0], "/tmp/prefix/lib/node_modules");
+	expect("and the tree inside the dsh package sitting there", report?.lib?.[1], "/tmp/prefix/lib/node_modules/@deepseek-ai/dsh/node_modules");
+	expect("a package directory offers the tree inside it, which is where its dependencies live", report?.pkg?.[0], "/tmp/prefix/lib/node_modules/@deepseek-ai/dsh/node_modules");
+	expect("and itself as the last resort", report?.pkg?.[3], "/tmp/prefix/lib/node_modules/@deepseek-ai/dsh");
+	expect("an unset DSH_INSTALL contributes nothing", report?.empty, []);
+} finally {
+	rmSync(hermetic, { recursive: true, force: true });
 }
 
 /* ---------------------------------------------------------------------- done */
