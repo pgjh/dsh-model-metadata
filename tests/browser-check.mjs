@@ -8,144 +8,31 @@
  *
  *   node tests/browser-check.mjs                     # newest launch token from journalctl
  *   node tests/browser-check.mjs --url "http://127.0.0.1:3080/?token=…"   # --card <provider> picks a card
- *   node tests/browser-check.mjs --out shot.png --keep-logs
+ *   node tests/browser-check.mjs --out shot.png
  *
  * It opens the app, clicks 设置 → 模型, then prints: whether the panel's own
  * text is in the DOM, whether the bundle URL was fetched, every console message
- * and page error, and (with --out) a screenshot to look at.
+ * and page error, and (with --out) a screenshot to look at. The verdict is the
+ * exit code: 0 when the bundle was fetched and the fused cells mounted, 2 otherwise.
+ *
+ * The page is driven through the shared CDP helper (`tests/cdp.mjs`).
  */
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromePath, dshInstall } from "../dev-paths.mjs";
+import { appUrl, flag, openPage, option, sleep } from "./cdp.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DSH = dshInstall();
-const CHROME = chromePath();
-const require = createRequire(join(DSH, "node_modules", "noop.js"));
-const { WebSocket } = require("ws");
 
-const argv = process.argv.slice(2);
-const option = (name, fallback) => {
-	const at = argv.indexOf(name);
-	return at === -1 ? fallback : argv[at + 1];
-};
-
-/**
- * The launch URL, from `--url` or from the journal of the unit named by `DSH_UNIT`.
- * Naming the unit is required because no unit name is universal.
- * @returns the tokenised app URL.
- */
-function tokenUrl() {
-	const unit = process.env.DSH_UNIT;
-	const line = execFileSync("journalctl", ["--user", "-u", unit, "--no-pager"], { encoding: "utf8" });
-	const matches = [...line.matchAll(/dsh web: (http:\S+token=\S+)/gu)];
-	if (matches.length === 0) throw new Error(`no launch URL in the journal of "${String(unit)}"; pass --url instead`);
-	return matches[matches.length - 1][1];
-}
-
-/** Resolve the URL, and say what to do when the unit was not named. */
-function resolveUrl() {
-	const given = option("--url", undefined);
-	if (given !== undefined) return given;
-	if (process.env.DSH_UNIT === undefined) {
-		throw new Error("pass --url \"http://127.0.0.1:3080/?token=…\", or set DSH_UNIT to your systemd unit name to read it from the journal");
-	}
-	return tokenUrl();
-}
-const url = resolveUrl();
+const url = appUrl();
 const out = option("--out", undefined);
-const port = Number(option("--port", "9333"));
-const window = option("--window", "1400,1000");
-const profile = join(HERE, ".browser-profile");
-rmSync(profile, { recursive: true, force: true });
-mkdirSync(profile, { recursive: true });
-/* A crash must not leave a Chromium profile (and its device ids) inside the repository. */
-process.on("exit", () => rmSync(profile, { recursive: true, force: true }));
-
-const chrome = spawn(CHROME, [
-	"--headless=new",
-	`--remote-debugging-port=${String(port)}`,
-	`--user-data-dir=${profile}`,
-	"--no-sandbox",
-	"--disable-gpu",
-	"--disable-dev-shm-usage",
-	`--window-size=${window}`,
-	"about:blank"
-], { stdio: ["ignore", "ignore", "pipe"] });
-let chromeErrors = "";
-chrome.stderr.on("data", (chunk) => { chromeErrors += String(chunk); });
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** Wait for the DevTools HTTP endpoint to answer. */
-async function debuggerUrl() {
-	for (let attempt = 0; attempt < 100; attempt++) {
-		try {
-			const response = await fetch(`http://127.0.0.1:${String(port)}/json/list`);
-			const targets = await response.json();
-			const page = targets.find((target) => target.type === "page");
-			if (page?.webSocketDebuggerUrl !== undefined) return page.webSocketDebuggerUrl;
-		} catch {
-			/* not up yet */
-		}
-		await sleep(200);
-	}
-	throw new Error("chromium never exposed a page target");
-}
-
-const socket = new WebSocket(await debuggerUrl());
-await new Promise((resolve, reject) => {
-	socket.once("open", resolve);
-	socket.once("error", reject);
+const session = await openPage(url, {
+	port: option("--port", "9333"),
+	window: option("--window", "1400,1000"),
+	profile: join(HERE, ".browser-profile"),
+	readyMs: 3000
 });
-
-let nextId = 0;
-const pending = new Map();
-const logs = [];
-socket.on("message", (raw) => {
-	const message = JSON.parse(String(raw));
-	if (message.id !== undefined) {
-		const waiter = pending.get(message.id);
-		if (waiter !== undefined) {
-			pending.delete(message.id);
-			message.error === undefined ? waiter.resolve(message.result) : waiter.reject(new Error(JSON.stringify(message.error)));
-		}
-		return;
-	}
-	if (message.method === "Runtime.consoleAPICalled") logs.push(`[console.${String(message.params.type)}] ${message.params.args.map((arg) => String(arg.value ?? arg.description ?? arg.type)).join(" ")}`);
-	else if (message.method === "Runtime.exceptionThrown") logs.push(`[exception] ${String(message.params.exceptionDetails.exception?.description ?? message.params.exceptionDetails.text)}`);
-	else if (message.method === "Log.entryAdded") logs.push(`[log.${String(message.params.entry.level)}] ${String(message.params.entry.text)}`);
-});
-const send = (method, params = {}) => new Promise((resolve, reject) => {
-	const id = ++nextId;
-	pending.set(id, { resolve, reject });
-	socket.send(JSON.stringify({ id, method, params }));
-});
-
-const evaluate = async (expression) => (await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result?.value;
-
-await send("Page.enable");
-await send("Runtime.enable");
-await send("Log.enable");
-await send("Page.navigate", { url });
-await sleep(3000);
-for (let attempt = 0; attempt < 40 && (await evaluate("document.readyState")) !== "complete"; attempt++) await sleep(250);
-
-/** Click the first leaf element whose trimmed text matches exactly. */
-const click = async (text) => evaluate(`(() => {
-	const wanted = ${JSON.stringify(text)};
-	const all = [...document.querySelectorAll("button, a, li, div, span, p")];
-	const exact = all.find((node) => node.children.length === 0 && node.textContent.trim() === wanted);
-	const contains = all.find((node) => node.children.length === 0 && node.textContent.includes(wanted));
-	const labelled = document.querySelector(\`[aria-label*=\${JSON.stringify(wanted)}]\`);
-	const hit = exact ?? contains ?? labelled;
-	if (hit === undefined || hit === null) return false;
-	hit.click();
-	return true;
-})()`);
+const { send, evaluate, click, logs } = session;
 
 const clickedSettings = await click("设置");
 await sleep(1500);
@@ -290,7 +177,7 @@ const fusion = await evaluate(`(async () => {
  * how the capacity duplication was found: 编辑 → 自定义设置 → 模型目录 → each
  * row's 容量 grid already owns 上下文窗口 and 最大输出 token. */
 let editor;
-if (argv.includes("--edit")) {
+if (flag("--edit")) {
 	editor = await evaluate(`(() => {
 		const cards = [...document.querySelectorAll("li")];
 		const card = cards.find((node) => [...node.querySelectorAll("button")].some((b) => b.textContent.trim() === "取消" || b.textContent.trim() === "保存"));
@@ -335,8 +222,16 @@ if (out !== undefined) {
 }
 
 console.log(JSON.stringify(report, null, 2));
-if (chromeErrors.trim().length > 0 && (report.fusion?.cells ?? 0) === 0) console.log(`chromium stderr:\n${chromeErrors.split("\n").slice(-8).join("\n")}`);
-socket.close();
-chrome.kill("SIGKILL");
-rmSync(profile, { recursive: true, force: true });
-if (!existsSync(CHROME)) process.exit(2);
+const noise = session.chromeErrors();
+if (noise.trim().length > 0 && report.cellsMounted === 0) console.log(`chromium stderr:\n${noise.split("\n").slice(-8).join("\n")}`);
+session.close();
+/*
+ * The verdict, said in the exit code as well as in the JSON: a run where the bundle was
+ * never fetched or no fused cell mounted has found the regression this tool exists for,
+ * and an exit status of 0 would report it as a success to whoever called the tool.
+ */
+const proved = report.bundleFetched.length > 0 && report.cellsMounted > 0;
+console.log(proved
+	? `VERDICT ok: ${String(report.cellsMounted)} fused cell(s) mounted, the client bundle was fetched`
+	: `VERDICT negative: ${String(report.bundleFetched.length)} bundle fetch(es), ${String(report.cellsMounted)} fused cell(s)`);
+if (!proved) process.exitCode = 2;

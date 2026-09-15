@@ -11,22 +11,24 @@
  * resolves models out of the new data — i.e. "a newly released model starts
  * working after a daily refresh, without a restart".
  */
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { sandbox } from "./harness.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { adapterEntry } from "../dev-paths.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ADAPTER = adapterEntry();
 const PLUGIN = process.env.DSH_CATALOG_FALLBACK_PLUGIN ?? join(HERE, "..", "lib/index.mjs");
-const WORK = join(HERE, ".live-refresh");
-const SNAPSHOT = join(WORK, "models-dev-snapshot.json");
+/* Outside the checkout, like every other suite: a run killed before its cleanup hook
+ * used to leave a scratch directory inside the repository. */
+const WORK = sandbox("live-refresh");
+const SNAPSHOT = WORK.file("models-dev-snapshot.json");
 const DEADLINE_MS = Number(process.env.LIVE_REFRESH_DEADLINE_MS ?? 300000);
 
-rmSync(WORK, { recursive: true, force: true });
-mkdirSync(WORK, { recursive: true });
 process.env.DSH_PI_AI_CATALOG_SNAPSHOT = SNAPSHOT;
-process.env.DSH_PI_AI_SETTINGS_FILE = join(WORK, "settings.yaml");
+process.env.DSH_PI_AI_SETTINGS_FILE = WORK.file("settings.yaml");
+writeFileSync(process.env.DSH_PI_AI_SETTINGS_FILE, "llm-pi-ai:\n  providers: {}\n");
 delete process.env.DSH_PI_AI_CATALOG_REFRESH; // default policy: refresh a missing file
 const noop = () => {};
 const captured = {};
@@ -61,7 +63,7 @@ const resolved = await captured.adapter.resolveModel("probe", "probe/deepseek-v4
 if (resolved.context?.contextWindow === 262144) failures.push("resolution still reports the route default");
 console.log(`  resolution now reports context ${String(resolved.context?.contextWindow)}`);
 
-rmSync(WORK, { recursive: true, force: true });
+WORK.clean();
 if (failures.length > 0) {
 	for (const failure of failures) console.log(`FAIL ${failure}`);
 	process.exit(1);

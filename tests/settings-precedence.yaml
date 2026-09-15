@@ -23,6 +23,12 @@ llm-pi-ai:
           reasoningEfforts:
             low: low
             high: high
+        # explicit "text only": the installed catalog knows this name as image-capable,
+        # and a declaration on the row must win over that
+        - id: probe/glm-5v-turbo
+          name: probe/glm-5v-turbo
+          input:
+            - text
         # matches the official deepseek catalog under the relaxed spelling:
         # borrowed freely, nothing here declares anything
         - id: probe/deepseek-v4.1-flash

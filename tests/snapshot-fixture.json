@@ -2,14 +2,17 @@
   "fetchedAt": "2026-01-01T00:00:00.000Z",
   "source": "fixture",
   "providers": 1,
-  "count": 2,
+  "count": 6,
   "models": {
     "zephyr-9-pro": {
       "provider": "fixture-vendor",
       "name": "Zephyr 9 Pro",
       "contextWindow": 900000,
       "maxTokens": 123456,
-      "input": ["text", "image"],
+      "input": [
+        "text",
+        "image"
+      ],
       "reasoning": true
     },
     "zephyr-9-air": {
@@ -17,8 +20,39 @@
       "name": "Zephyr 9 Air",
       "contextWindow": 400000,
       "maxTokens": 65432,
-      "input": ["text"],
+      "input": [
+        "text"
+      ],
       "reasoning": false
+    },
+    "mirror-x/kimi-k9-ultra": {
+      "provider": "mirror-x",
+      "name": "Kimi K9 Ultra",
+      "contextWindow": 1234,
+      "maxTokens": 111,
+      "reasoning": false
+    },
+    "moonshotai/Kimi-K9-Ultra": {
+      "provider": "moonshotai",
+      "name": "Kimi K9 Ultra",
+      "contextWindow": 999999,
+      "maxTokens": 65536,
+      "reasoning": true
+    },
+    "nebula-5": {
+      "provider": "mirror-x",
+      "name": "Nebula 5",
+      "contextWindow": 55555,
+      "maxTokens": 4096,
+      "reasoning": true
+    },
+    "img/nebula-5": {
+      "provider": "mirror-x",
+      "name": "Nebula 5",
+      "contextWindow": 999999,
+      "maxTokens": 99999,
+      "reasoning": false,
+      "nonChat": true
     }
   }
 }

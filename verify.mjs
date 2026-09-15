@@ -12,11 +12,13 @@
  * context window, output cap and reasoning levels without touching route-owned
  * fields or overriding explicit settings.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { adapterEntry, nodeModulesDir } from "./dev-paths.mjs";
+import { pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const verbose = process.argv.includes("--verbose");
@@ -38,19 +40,41 @@ if (!existsSync(ADAPTER)) {
 if (existsSync(SNAPSHOT)) process.env.DSH_PI_AI_CATALOG_SNAPSHOT = SNAPSHOT;
 
 /**
- * Run one scenario through test-fallback.mjs and return its JSON rows. The
- * refresh policy is disabled for these runs: they must judge the resolution
- * logic against a known document, never against a file a background fetch may
- * replace mid-test.
+ * Run one scenario through test-fallback.mjs. The refresh policy is disabled for
+ * these runs: they must judge the resolution logic against a known document,
+ * never against a file a background fetch may replace mid-test.
+ * @param args - arguments for the child.
+ * @param env - extra environment for the child.
+ * @returns the spawn result, for the scenarios that assert on stderr as well.
+ */
+function runRaw(args, env = {}) {
+	/* The rows come back through a file rather than stdout: parsing a child's output
+	 * for the first `[` broke the moment the child printed a line containing one, and
+	 * a banner is not a protocol. */
+	const dir = mkdtempSync(join(tmpdir(), `dsh-mm-verify-${String(process.pid)}-`));
+	const out = join(dir, "rows.json");
+	try {
+		const result = spawnSync(process.execPath, [join(HERE, "test-fallback.mjs"), "--json-out", out, ...args], { encoding: "utf8", env: { ...process.env, DSH_PI_AI_CATALOG_REFRESH: "0", ...env } });
+		const rows = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : undefined;
+		return { ...result, rows };
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+/**
+ * One scenario's JSON rows.
+ * @param args - arguments for the child.
+ * @param env - extra environment for the child.
+ * @returns the rows the child printed.
  */
 function run(args, env = {}) {
-	const result = spawnSync(process.execPath, [join(HERE, "test-fallback.mjs"), "--json", ...args], { encoding: "utf8", env: { ...process.env, DSH_PI_AI_CATALOG_REFRESH: "0", ...env } });
-	if (result.status !== 0) {
+	const result = runRaw(args, env);
+	if (result.status !== 0 || result.rows === undefined) {
 		console.error(result.stderr || result.stdout);
 		process.exit(1);
 	}
-	const start = result.stdout.indexOf("[");
-	return JSON.parse(result.stdout.slice(start));
+	return result.rows;
 }
 
 const failures = [];
@@ -122,6 +146,9 @@ expect("declared: explicit maxTokens survives", rowOf(declared, "probe/gpt-5.4")
 expect("declared: reasoningEfforts: false is respected", rowOf(declared, "probe/gpt-5.4").reasoning, []);
 expect("declared: an explicit level subset is respected", rowOf(declared, "probe/kimi-k3").reasoning, ["low", "high"]);
 expect("declared: the rest of that model is still filled in", rowOf(declared, "probe/kimi-k3").contextWindow, 1048576);
+/* A declaration this plugin's own UI writes: the chain knows the name as
+ * image-capable, and the row must keep saying text-only. */
+expect("declared: an explicit input list survives the chain", rowOf(declared, "probe/glm-5v-turbo").input, ["text"]);
 
 /*
  * Scenario 4: input modalities ride the same chain by default, with narrower
@@ -142,6 +169,52 @@ expect("input=bundled: the official deepseek catalog counts as shipped", rowOf(b
 expect("input=bundled: a models.dev-only claim is ignored", rowOf(bundledOnly, "probe/zephyr-9-pro").input, ["text"]);
 
 /*
+ * The models.dev tier is not one tier. The same bare name is published by many
+ * providers, and their numbers disagree, so "whichever row the file lists first"
+ * must not be the answer: the model's own vendor wins, then a row whose id is the
+ * bare name, and a row that does not look like a chat model loses to one that does.
+ */
+expect("models.dev: the model's own vendor outranks another provider's row", rowOf(plugin, "probe/kimi-k9-ultra").contextWindow, 999999);
+expect("models.dev: and its reasoning flag travels with it", rowOf(plugin, "probe/kimi-k9-ultra").reasoning.flatMap((level) => level === "high" ? [level] : []), ["high"]);
+expect("models.dev: a chat row outranks a non-chat row of the same name", rowOf(plugin, "probe/nebula-5").contextWindow, 55555);
+
+/*
+ * Scenario 6: the mode switches. `off` must leave the seam exactly as it was,
+ * `context` fills capacities without ever offering a level, and an unrecognized
+ * value — the case that used to select the most permissive mode — must be reported
+ * and resolved to a documented one.
+ */
+const disabled = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK: "off" });
+expect("fallback=off: the route default is left alone", rowOf(disabled, "probe/glm-5.3").contextWindow, 262144);
+expect("fallback=off: and no levels are offered", rowOf(disabled, "probe/glm-5.3").reasoning, []);
+const contextOnly = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK: "context" });
+expect("fallback=context: capacities are still filled in", rowOf(contextOnly, "probe/glm-5.3").contextWindow, 1000000);
+expect("fallback=context: and reasoning is left to the seam", rowOf(contextOnly, "probe/glm-5.3").reasoning, []);
+/*
+ * Reasoning levels are chosen the same way input modalities are, and for the same
+ * reason: a bare `reasoning: true` from a mirror becomes five offered levels, which
+ * an endpoint may reject mid-turn. `bundled` restricts the claim to the catalogs
+ * that ship with the product — which carry a level map — and leaves a models.dev
+ * match to fill capacity only.
+ */
+expect("levels: the default lets the whole chain declare reasoning", rowOf(plugin, "probe/zephyr-9-pro").reasoning.length > 0, true);
+const bundledLevels = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_LEVELS: "bundled" });
+expect("levels=bundled: a models.dev-only model fills capacity without claiming levels", [rowOf(bundledLevels, "probe/zephyr-9-pro").contextWindow, rowOf(bundledLevels, "probe/zephyr-9-pro").reasoning], [900000, []]);
+expect("levels=bundled: a shipped catalog still declares its own levels", rowOf(bundledLevels, "probe/kimi-k3").reasoning, ["low", "high", "max"]);
+const noLevels = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_LEVELS: "off" });
+expect("levels=off: nothing claims reasoning, capacities still filled in", [rowOf(noLevels, "probe/kimi-k3").reasoning, rowOf(noLevels, "probe/kimi-k3").contextWindow], [[], 1048576]);
+const nonsenseLevels = runRaw(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_LEVELS: "yes please" });
+expect("an unrecognized levels value is reported and resolves to the conservative one", [
+	nonsenseLevels.stderr.includes("DSH_PI_AI_CATALOG_FALLBACK_LEVELS"),
+	nonsenseLevels.rows.find((row) => row.id === "probe/zephyr-9-pro").reasoning,
+	nonsenseLevels.rows.find((row) => row.id === "probe/kimi-k3").reasoning
+], [true, [], ["low", "high", "max"]]);
+
+const unknownMode = runRaw(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK: "ofl" });
+expect("an unrecognized fallback value is reported, not silently obeyed", unknownMode.stderr.includes("DSH_PI_AI_CATALOG_FALLBACK"), true);
+expect("and it resolves to the documented default rather than disabling the plugin", unknownMode.rows.find((row) => row.id === "probe/glm-5.3").contextWindow, 1000000);
+
+/*
  * Scenario 5: packaging invariants. Two of them are load-bearing enough to be
  * asserted rather than remembered: the client bundle must register under the package
  * name (the module system rejects anything else, silently), and the installer's patch
@@ -160,15 +233,68 @@ expect("packaging: the installer's marker is name-free, so a rename cannot orpha
 expect("packaging: and the historical name-bearing markers are still matched", /LEGACY_MARKER = \/\^/.test(installerSource), true);
 
 /*
+ * The two drift checks that would have caught the defects this round fixed: every
+ * module the entry point imports must actually be published (a flat install of the
+ * published tarball would otherwise import a file that is not there), and every
+ * environment variable the code reads must be documented (an undocumented switch is
+ * one nobody can use, and a renamed one silently stops working).
+ */
+const published = new Set(manifest.files ?? []);
+const imported = new Set();
+for (const file of ["index.mjs", "panel.mjs", "snapshot.mjs", "names.mjs", "refresh-snapshot.mjs"]) {
+	const text = readFileSync(join(HERE, "lib", file), "utf8");
+	for (const match of text.matchAll(/from\s+"(\.\/[^"]+)"/gu)) imported.add(match[1].replace("./", ""));
+}
+const missingFiles = [...imported].filter((name) => !published.has(`lib/${name}`));
+expect("packaging: every module the plugin imports is published", missingFiles, []);
+expect("packaging: the browser half is published too", published.has("lib/client.js"), true);
+/* The flat install copies FLAT_SOURCES; the package publishes `files`. A module in
+ * one list but not the other is an install that breaks, and the two lists are far
+ * apart in the tree — this is the cheapest place to notice. */
+const flat = await import(pathToFileURL(join(HERE, "packaging.mjs")).href);
+expect("packaging: the flat layout and the published files agree", flat.FLAT_SOURCES.filter((name) => !published.has(`lib/${name}`)), []);
+
+const readme = readFileSync(join(HERE, "README.md"), "utf8");
+const switches = new Set();
+for (const file of ["index.mjs", "refresh-snapshot.mjs", "client.js", "panel.mjs", "snapshot.mjs", "names.mjs"]) {
+	const text = readFileSync(join(HERE, "lib", file), "utf8");
+	for (const match of text.matchAll(/process\.env\.([A-Z0-9_]+)/gu)) switches.add(match[1]);
+}
+/* DSH's own variables are DSH's to document; everything this plugin reads is ours. */
+const foreign = new Set(["DSH_HOME"]);
+const undocumented = [...switches].filter((name) => !foreign.has(name) && !readme.includes(name));
+expect("packaging: every switch this plugin reads is documented", undocumented, []);
+
+/*
  * Scenario 6: the shipped suites. The snapshot must be re-read when it changes
  * (so a refreshed model list works without a restart), and the freshness policy
  * must do what it says. Their own summary is printed through.
  */
+/**
+ * Run one shipped suite and assert both that it exited zero and that it actually
+ * asserted something. The status alone cannot tell "all good" from "the suite
+ * stopped asserting": a suite that prints `0/0` and exits 0 used to pass, and its
+ * summary was silently swallowed by the label this function built.
+ * @param label - how the suite appears in the report.
+ * @param script - the suite's path, relative to this directory.
+ * @param env - extra environment for the child.
+ */
 function suite(label, script, env = {}) {
-	const result = spawnSync(process.execPath, [join(HERE, script), ...process.argv.slice(3)], { encoding: "utf8", env: { ...process.env, ...env } });
-	const summary = (result.stdout ?? "").trim().split("\n").filter((line) => line.includes("assertions passed") || line.includes("live refresh")).join(" | ");
-	expect(`${label}: ${summary === "" ? "exit status" : summary}`, result.status, 0);
-	if (result.status !== 0) console.log(result.stdout, result.stderr);
+	if (!existsSync(join(HERE, script))) {
+		expect(`${label}: the suite is present`, script, "(missing)");
+		return;
+	}
+	const result = spawnSync(process.execPath, [join(HERE, script), ...process.argv.slice(2)], { encoding: "utf8", env: { ...process.env, ...env } });
+	const stdout = result.stdout ?? "";
+	const summary = stdout.trim().split("\n").map((line) => line.trim()).filter((line) => /assertions passed/u.test(line)).pop();
+	const counts = /^(\d+)\/(\d+)\s+.*assertions passed/u.exec(summary ?? "");
+	if (counts === null) {
+		console.log(stdout, result.stderr);
+		expect(`${label}: the suite printed a summary`, summary ?? "(none)", "(one line like `N/M assertions passed`)");
+		return;
+	}
+	expect(`${label}: ${summary}`, [result.status, counts[1] === counts[2], Number(counts[2]) > 0], [0, true, true]);
+	if (result.status !== 0) console.log(stdout, result.stderr);
 }
 
 suite("hot snapshot", "tests/hot-snapshot.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });
@@ -176,6 +302,8 @@ suite("hot add", "tests/hot-add-model.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGI
 suite("refresh policy (default)", "tests/refresh-policy.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN, DSH_PI_AI_CATALOG_REFRESH: "24" });
 suite("refresh policy (disabled)", "tests/refresh-policy.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN, DSH_PI_AI_CATALOG_REFRESH: "0" });
 suite("settings panel", "tests/panel.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });
+suite("unit", "tests/unit.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });
+suite("install-plugin", "tests/install-plugin.mjs");
 
 console.log("");
 console.log(`${String(checks - failures.length)}/${String(checks)} assertions passed`);

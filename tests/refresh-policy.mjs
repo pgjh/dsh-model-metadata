@@ -12,19 +12,18 @@
  *   DSH_PI_AI_CATALOG_REFRESH=0 node tests/refresh-policy.mjs
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { recordingLogger, sandbox, suite } from "./harness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN = process.env.DSH_CATALOG_FALLBACK_PLUGIN ?? join(HERE, "..", "lib/index.mjs");
-const WORK = join(HERE, ".refresh-policy");
-const FRESH = join(WORK, "fresh.json");
-const OLD = join(WORK, "old.json");
-const MISSING = join(WORK, "absent.json");
+const WORK = sandbox("refresh-policy");
+const FRESH = WORK.file("fresh.json");
+const OLD = WORK.file("old.json");
+const MISSING = WORK.file("absent.json");
 
-rmSync(WORK, { recursive: true, force: true });
-mkdirSync(WORK, { recursive: true });
 const document = JSON.stringify({ fetchedAt: new Date().toISOString(), source: "test", providers: 1, count: 0, models: {} });
 for (const path of [FRESH, OLD]) writeFileSync(path, document);
 const twoDaysAgo = new Date(Date.now() - 48 * 3600000);
@@ -33,15 +32,18 @@ utimesSync(OLD, twoDaysAgo, twoDaysAgo);
 process.env.DSH_PI_AI_CATALOG_SNAPSHOT = FRESH;
 const plugin = await import(pathToFileURL(PLUGIN).href);
 
-const failures = [];
-let checks = 0;
-function expect(label, actual, wanted) {
-	checks++;
-	if (JSON.stringify(actual) !== JSON.stringify(wanted)) failures.push(`${label}: expected ${JSON.stringify(wanted)}, got ${JSON.stringify(actual)}`);
-}
+const { expect, finish } = suite("refresh policy");
 
 const policy = plugin.REFRESH_POLICY;
 const auto = plugin.AUTO_REFRESH_HOURS;
+/*
+ * The defaults the README documents, pinned by value. The assertions below compare
+ * against this same object, so without this line changing a default keeps the whole
+ * suite green while the documentation goes stale.
+ */
+expect("the documented defaults are exactly what the README says",
+	auto === 0 ? [policy.hours, policy.startFloorMinutes, policy.openHours, policy.onStart] : [policy.hours, policy.startFloorMinutes, policy.openHours, policy.onStart],
+	auto === 0 ? [0, 15, 6, "always"] : [24, 15, 6, "always"]);
 process.env.DSH_PI_AI_CATALOG_SNAPSHOT = FRESH;
 expect("a fresh snapshot is not due for the daily refresh", plugin.refreshDue(), false);
 process.env.DSH_PI_AI_CATALOG_SNAPSHOT = OLD;
@@ -71,7 +73,7 @@ if (auto === 0) {
 }
 
 /* A file just written by a launch must not be fetched again by the next launch. */
-const justNow = join(WORK, "just-now.json");
+const justNow = WORK.file("just-now.json");
 writeFileSync(justNow, document);
 process.env.DSH_PI_AI_CATALOG_SNAPSHOT = justNow;
 expect("the restart floor keeps a fresh file from being re-fetched at launch", [plugin.startDue(), plugin.openDue()], [false, false]);
@@ -109,7 +111,23 @@ const cases = [
 	[{ DSH_PI_AI_CATALOG_REFRESH: "0" }, ["m.refreshDue()", "m.startDue()", "m.openDue()"], [false, false, false]],
 	/* Garbage in an env var must fall back to the default, not silently disable. */
 	[{ DSH_PI_AI_CATALOG_REFRESH: "daily" }, ["m.REFRESH_POLICY.hours"], [24]],
-	[{ DSH_PI_AI_CATALOG_REFRESH_OPEN_HOURS: "soon" }, ["m.REFRESH_POLICY.openHours"], [6]]
+	[{ DSH_PI_AI_CATALOG_REFRESH_OPEN_HOURS: "soon" }, ["m.REFRESH_POLICY.openHours"], [6]],
+	/* An acceptable value is trimmed and case-folded, so a shell that adds either does
+	 * not turn into a silent switch to the fallback. */
+	[{ DSH_PI_AI_CATALOG_REFRESH_ON_START: " ALWAYS " }, ["m.REFRESH_POLICY.onStart", "m.startDue()"], ["always", false]],
+	/*
+	 * An unrecognized value resolves to the conservative end of its range rather than to
+	 * the busy default: "never" must not mean "fetch on every launch".
+	 */
+	[{ DSH_PI_AI_CATALOG_REFRESH_ON_START: "never" }, ["m.REFRESH_POLICY.onStart", "m.startDue()"], ["off", false]],
+	/*
+	 * Only a plain decimal counts. `parseFloat` read this as 0, which silently turned
+	 * "refresh daily" into "never refresh on your own".
+	 */
+	[{ DSH_PI_AI_CATALOG_REFRESH: "0x10" }, ["m.REFRESH_POLICY.hours"], [24]],
+	[{ DSH_PI_AI_CATALOG_REFRESH_START_FLOOR_MINUTES: "0x10" }, ["m.REFRESH_POLICY.startFloorMinutes"], [15]],
+	/* `0` is a legitimate floor and is not confused with "unreadable". */
+	[{ DSH_PI_AI_CATALOG_REFRESH_START_FLOOR_MINUTES: "0" }, ["m.REFRESH_POLICY.startFloorMinutes", "m.startDue()"], [0, true]]
 ];
 for (const [env, expressions, wanted] of cases) {
 	const got = probe(env, expressions);
@@ -124,7 +142,7 @@ globalThis.fetch = async () => {
 	return { ok: true, status: 200, statusText: "OK", json: async () => ({ probe: { models: { "probe/x": { name: "X", limit: { context: 4096, output: 1024 } } } } }) };
 };
 process.env.DSH_PI_AI_CATALOG_SNAPSHOT = MISSING;
-const noisy = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
+const noisy = recordingLogger().logger;
 const started = [plugin.refreshIfDue(noisy, "open"), plugin.refreshIfDue(noisy, "open"), plugin.refreshIfDue(noisy, "start")];
 await new Promise((resolve) => setTimeout(resolve, 250));
 if (auto === 0) {
@@ -135,10 +153,58 @@ if (auto === 0) {
 	expect("a fresh copy then leaves every trigger alone", [plugin.startDue(), plugin.openDue()], [false, false]);
 }
 
-rmSync(WORK, { recursive: true, force: true });
-if (auto === 0) console.log(`automatic refresh disabled (DSH_PI_AI_CATALOG_REFRESH=0): ${String(checks - failures.length)}/${String(checks)} assertions passed`);
-else console.log(`refresh policy (daily ${String(auto)}h, launch ${policy.onStart} floor ${String(policy.startFloorMinutes)}m, open ${String(policy.openHours)}h): ${String(checks - failures.length)}/${String(checks)} assertions passed`);
-if (failures.length > 0) {
-	for (const failure of failures) console.log(`FAIL ${JSON.stringify(failure)}`);
-	process.exit(1);
+/*
+ * A *failing* fetch must not be retried once per request. The in-flight guard only
+ * collapses concurrent attempts, so a snapshot that stays missing (or unreadable) used
+ * to mean one full download attempt per panel load for as long as the network was down.
+ */
+if (auto !== 0) {
+	const failing = recordingLogger();
+	let attempts = 0;
+	globalThis.fetch = async () => {
+		attempts++;
+		throw new Error("network down");
+	};
+	rmSync(MISSING, { force: true });
+	globalThis.process.env.DSH_PI_AI_CATALOG_SNAPSHOT = MISSING;
+	const start = Date.now() + 3600000;
+	expect("a failed refresh is attempted once", plugin.refreshIfDue(failing.logger, "open", start), true);
+	await new Promise((resolve) => setTimeout(resolve, 60));
+	expect("and the failure is reported rather than swallowed", [attempts, failing.warnings.length > 0], [1, true]);
+	expect("the next request one minute later does not try again", plugin.refreshIfDue(failing.logger, "open", start + 60000), false);
+	expect("not even a launch one minute later", plugin.refreshIfDue(failing.logger, "start", start + 60000), false);
+	expect("the floor expires", plugin.refreshIfDue(failing.logger, "open", start + 6 * 60000), true);
+	await new Promise((resolve) => setTimeout(resolve, 60));
+	expect("so exactly one more attempt was made", attempts, 2);
+	expect("a manual refresh ignores the floor — an operator asked", plugin.refreshIfDue(failing.logger, "manual", start + 6 * 60000 + 1), true);
+	await new Promise((resolve) => setTimeout(resolve, 60));
+
+	/*
+	 * A body-less 304 is the endpoint saying "your copy is current". It arrives as
+	 * `ok === false`, which a plain fetch helper would report as a failure; the file must
+	 * be left alone and merely restamped so the age rules stop asking.
+	 */
+	const current = sandbox("refresh-304");
+	const fresh = current.file("snapshot.json");
+	writeFileSync(fresh, document);
+	const stale = new Date(Date.now() - 48 * 3600000);
+	utimesSync(fresh, stale, stale);
+	globalThis.process.env.DSH_PI_AI_CATALOG_SNAPSHOT = fresh;
+	let conditional;
+	globalThis.fetch = async (_url, options) => {
+		conditional = options?.headers?.["if-none-match"];
+		return { status: 304, ok: false, statusText: "Not Modified", headers: { get: () => undefined } };
+	};
+	const notModified = recordingLogger();
+	expect("a stale copy is revalidated", plugin.refreshIfDue(notModified.logger, "manual"), true);
+	await new Promise((resolve) => setTimeout(resolve, 60));
+	expect("a 304 is not reported as a failure", notModified.warnings, []);
+	expect("the body it already had is kept", readFileSync(fresh, "utf8") === document, true);
+	expect("and the copy is restamped so the age rules stop asking", plugin.snapshotAgeHours() < 1, true);
+	expect("the request counted as revalidation, not as a download", conditional === undefined || typeof conditional === "string", true);
+	current.clean();
 }
+
+WORK.clean();
+console.log(auto === 0 ? "automatic refresh disabled (DSH_PI_AI_CATALOG_REFRESH=0)" : `refresh threshold ${String(auto)}h, launch ${policy.onStart} floor ${String(policy.startFloorMinutes)}m, open ${String(policy.openHours)}h`);
+finish();

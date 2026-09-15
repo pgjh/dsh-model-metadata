@@ -16,23 +16,22 @@
  * Runs against the real install (never modified) with this checkout's plugin, in
  * its own temp directory, and exits non-zero on any mismatch.
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { adapterEntry } from "../dev-paths.mjs";
+import { recordingLogger, sandbox, suite } from "./harness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ADAPTER = adapterEntry();
 const PLUGIN = process.env.DSH_CATALOG_FALLBACK_PLUGIN ?? join(HERE, "..", "lib/index.mjs");
-const WORK = join(HERE, ".hot-snapshot");
-const SNAPSHOT = join(WORK, "models-dev-snapshot.json");
+const WORK = sandbox("hot-snapshot");
+const SNAPSHOT = WORK.file("models-dev-snapshot.json");
 
-rmSync(WORK, { recursive: true, force: true });
-mkdirSync(WORK, { recursive: true });
 process.env.DSH_PI_AI_CATALOG_SNAPSHOT = SNAPSHOT;
 process.env.DSH_PI_AI_CATALOG_REFRESH = "0"; // the test owns the file
-process.env.DSH_PI_AI_SETTINGS_FILE = join(WORK, "settings.yaml");
-writeFileSync(join(WORK, "settings.yaml"), "llm-pi-ai:\n  providers: {}\n");
+process.env.DSH_PI_AI_SETTINGS_FILE = WORK.file("settings.yaml");
+writeFileSync(process.env.DSH_PI_AI_SETTINGS_FILE, "llm-pi-ai:\n  providers: {}\n");
 
 /** One snapshot document around the given per-model values. */
 function writeSnapshot(models) {
@@ -40,22 +39,16 @@ function writeSnapshot(models) {
 }
 const entry = (contextWindow, reasoning = true) => ({ provider: "vendor", contextWindow, maxTokens: 4096, reasoning });
 
-const failures = [];
-let checks = 0;
-function expect(label, actual, wanted) {
-	checks++;
-	if (JSON.stringify(actual) !== JSON.stringify(wanted)) failures.push(`${label}: expected ${JSON.stringify(wanted)}, got ${JSON.stringify(actual)}`);
-}
+const { expect, ok, finish } = suite("hot snapshot");
 
 const providers = { providers: { probe: { displayName: "probe", api: "openai-responses", baseURL: "http://127.0.0.1:1/v1", models: [{ id: "acme/glm-5.3", name: "acme/glm-5.3" }, { id: "acme/brand-new-model", name: "acme/brand-new-model" }] } } };
 
 const captured = {};
-const noop = () => {};
-const quiet = { debug: noop, info: noop, warn: noop, error: noop };
+const { logger: quiet, warnings } = recordingLogger();
 const plugin = await import(pathToFileURL(PLUGIN).href);
 const { apply } = await import(pathToFileURL(ADAPTER).href);
-plugin.apply({ get: () => undefined, inject: noop, logger: quiet });
-apply({ get: () => undefined, inject: noop, logger: quiet, llm: { registerConfigurableProviders: () => ({ replace: noop }), registerModelDiscovery: noop, registerAdapter: (_routes, adapter) => { captured.adapter = adapter; return { replace: noop }; } } }, providers);
+plugin.apply({ get: () => undefined, inject: () => {}, logger: quiet });
+apply({ get: () => undefined, inject: () => {}, logger: quiet, llm: { registerConfigurableProviders: () => ({ replace: () => {} }), registerModelDiscovery: () => {}, registerAdapter: (_routes, adapter) => { captured.adapter = adapter; return { replace: () => {} }; } } }, providers);
 const adapter = captured.adapter;
 const infoOf = (id) => adapter.resolveModel("probe", id);
 const contextOf = async (id) => (await infoOf(id)).context?.contextWindow;
@@ -78,13 +71,21 @@ expect("a withdrawn reasoning capability is seen immediately", (await infoOf("ac
 writeSnapshot({ "glm-5.3": entry(123456), "brand-new-model": entry(65536) });
 expect("the shipped catalog still wins for a known name", await contextOf("acme/glm-5.3"), 1000000);
 
-/* 5. a broken file must not take resolution down with it */
+/* 5. a rewrite of exactly the same size is still noticed: the change key is mtime
+ * *and* size, and size alone would not see it. */
+writeSnapshot({ "brand-new-model": entry(65536) });
+const before = await contextOf("acme/brand-new-model");
+/* The same document, one digit apart in one number: identical length, different content. */
+writeSnapshot({ "brand-new-model": { provider: "vendor", contextWindow: 75536, maxTokens: 4096, reasoning: true } });
+expect("a same-size rewrite is seen, so size alone is not the change key", [before, await contextOf("acme/brand-new-model")], [65536, 75536]);
+
+/* 6. a broken file must not take resolution down with it — and must say so. */
 writeFileSync(SNAPSHOT, "{ this is not json");
 expect("a corrupt snapshot keeps resolution working", typeof (await contextOf("acme/glm-5.3")), "number");
+expect("a corrupt snapshot is reported once, not silently swallowed", [warnings.length, warnings[0]?.includes(SNAPSHOT)], [1, true]);
+/* Reading it again (a second resolution) must not repeat the warning. */
+await contextOf("acme/brand-new-model");
+expect("and not repeated on every resolution", warnings.length, 1);
 
-console.log(`${String(checks - failures.length)}/${String(checks)} hot-snapshot assertions passed`);
-rmSync(WORK, { recursive: true, force: true });
-if (failures.length > 0) {
-	for (const failure of failures) console.log(`FAIL ${failure}`);
-	process.exit(1);
-}
+WORK.clean();
+finish();

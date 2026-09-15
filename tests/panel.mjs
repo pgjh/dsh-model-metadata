@@ -12,21 +12,17 @@
  *      its own, and its helpers agree with the host's `panel.mjs` — the two halves
  *      must not drift.
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { installedManifest, homePatchRow } from "../packaging.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
+import { loadBundle, reactShim, sandbox, suite, walkElements } from "./harness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN = process.env.DSH_CATALOG_FALLBACK_PLUGIN ?? join(HERE, "..", "lib/index.mjs");
 const CLIENT = join(dirname(PLUGIN), "client.js");
-
-const failures = [];
-let checks = 0;
-function expect(label, actual, wanted) {
-	checks++;
-	if (JSON.stringify(actual) !== JSON.stringify(wanted)) failures.push(`${label}: expected ${JSON.stringify(wanted)}, got ${JSON.stringify(actual)}`);
-}
+const { expect, finish } = suite("settings panel");
 
 /* 1 + 2: the host-side builders. */
 const panel = await import(pathToFileURL(join(dirname(PLUGIN), "panel.mjs")).href);
@@ -76,37 +72,14 @@ const flat = installedManifest(manifest);
 expect("a flat install re-points the entry points at the files it actually has", [flat.exports["./client"], flat.exports["."], flat.name, flat.dsh?.client?.platform], ["./client.js", "./index.mjs", manifest.name, "web"]);
 expect("and the home patch row loads that layout's entry", homePatchRow("/home/u/.dsh/plugins/" + manifest.name, manifest.name), { id: manifest.name, name: `/home/u/.dsh/plugins/${manifest.name}/index.mjs` });
 expect("the client half declares the page it extends", manifest.dsh?.client?.inject?.includes("@deepseek-ai/dsh-client-ui-settings-models"), true);
-const source = readFileSync(CLIENT, "utf8");
-let registration;
-globalThis.window = { __ModuleLoader__: { load: (entry) => { registration = entry; } } };
-const moduleShim = { exports: {} };
-const react = {
-	Fragment: Symbol.for("react.fragment"),
-	createElement: (type, props, ...children) => ({ type, props, children }),
-	useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
-	useRef: (initial) => ({ current: initial }),
-	useEffect: () => {},
-	useCallback: (fn) => fn,
-	useMemo: (fn) => fn()
-};
-await import(`${pathToFileURL(CLIENT).href}?test=${String(Date.now())}`);
+const { registration, exportsOf, required } = await loadBundle(CLIENT);
 /* The name is load-bearing: the client module system rejects a bundle that registers
  * under anything other than its package name, so derive it rather than hardcode it. */
 expect("the bundle registers itself under the package's own name", [registration?.id, typeof registration?.factory], [manifest.name, "function"]);
-if (typeof registration?.factory === "function") {
-	const required = [];
-	const exportsOf = registration.factory((specifier) => {
-		required.push(specifier);
-		if (specifier === "react") return react;
-		if (specifier === "react-dom") return { createPortal: (element, container) => ({ type: "portal", container, element }) };
-		if (specifier === "react-dom/client") return { createRoot: () => ({ render: () => {}, unmount: () => {} }) };
-		if (specifier === "@deepseek-ai/dsh-client-ui-primitives") return {
-			Menu: (props) => ({ type: "menu", props }),
-			IconChevronDownOutline14: (props) => ({ type: "chevron", props })
-		};
-		throw new Error(`the client bundle required unexpected module "${specifier}"`);
-	});
-	expect("the client plugin declares its services", exportsOf.inject, ["slots", "remote", "remote.settings"]);
+{
+	/* `locale` is declared so the fused cells can follow the Settings page's language;
+	 * the bundle still works when the service is absent (see the dictionary assertions). */
+	expect("the client plugin declares its services", exportsOf.inject, ["slots", "remote", "remote.settings", "locale"]);
 	/* The picker must be DSH's own dropdown: a platform <select> is what the owner
 	 * saw opening the operating system's radio sheet on mobile. */
 	expect("the bundle loads DSH's primitives and a React root to draw into", required.includes("@deepseek-ai/dsh-client-ui-primitives") && required.includes("react-dom/client"), true);
@@ -132,11 +105,24 @@ if (typeof registration?.factory === "function") {
 	expect("a card with no route id renders nothing", blank?.type?.(blank.props), null);
 
 	expect("twins: managed fields", [client.PANEL_FIELDS, client.EDITABLE_FIELDS], [panel.PANEL_FIELDS, panel.EDITABLE_FIELDS]);
+	expect("twins: the settings namespace is spelled once, not twice", client.NS, panel.SETTINGS_NAMESPACE);
+	/* Both dictionaries must cover the same keys: a missing translation shows as a raw
+	 * key in the UI, and the fallback language is the one that hides it. */
+	expect("twins: every string is translated in both languages", [Object.keys(client.zh).filter((key) => !(key in client.en)), Object.keys(client.en).filter((key) => !(key in client.zh))], [[], []]);
+	/* And nothing is left in the dictionary after the code stopped using it: a key
+	 * appears twice when it is only ever defined (once per language), and a third time
+	 * wherever it is read. */
+	const bundleSource = readFileSync(CLIENT, "utf8");
+	expect("twins: no dictionary key is orphaned", Object.keys(client.zh).filter((key) => bundleSource.split(`"${key}"`).length - 1 < 3), []);
 	expect("twins: no capacity parser is exported — this half has no capacity input", client.parseCapacity, undefined);
+	expect("twins: the capacity line the test used to pin is gone with the dead code", client.capacityLine, undefined);
 	expect("twins: capacity spells exactly when it can, and says 约 when it cannot",
-		[client.formatCapacity(1000000), client.formatCapacity(200000), client.formatCapacity(131072), client.formatCapacity(262144), client.formatCapacity(32768), client.formatCapacity(123456), client.formatCapacity(undefined)],
-		["1M", "200K", "128K", "256K", "32K", "约 123K", ""]);
+		[client.formatCapacity(1000000), client.formatCapacity(200000), client.formatCapacity(131072), client.formatCapacity(262144), client.formatCapacity(32768), client.formatCapacity(123456), client.formatCapacity(1048576), client.formatCapacity(undefined)],
+		["1M", "200K", "128K", "256K", "32K", "约 123K", "1M", ""]);
 	expect("twins: level parsing", [client.parseLevels("low, high, max").value, client.parseLevels("false").value, client.parseLevels("off").value, client.parseLevels("nope").error !== undefined], [{ low: "low", high: "high", max: "max" }, false, { off: null }, true]);
+	/* A named level with no value is a mistake for every level, `off=` included: it used
+	 * to be read as "send nothing" while `low=` errored, so the odd one out was silent. */
+	expect("twins: an empty wire value errors for every level", [client.parseLevels("off=").error !== undefined, client.parseLevels("low=").error !== undefined, client.parseLevels("off=none").value], [true, true, { off: "none" }]);
 	expect("twins: level spelling", client.formatLevels({ off: null, low: "low", high: "HIGH" }), "off, low, high=HIGH");
 	expect("twins: every preset the menu offers round-trips through the parser", client.LEVEL_PRESETS.map(([value]) => value === "" || client.parseLevels(value).error === undefined), [true, true, true, true, true, true]);
 	expect("twins: the menu label spells a declaration no preset holds", [client.levelLabel(""), client.levelLabel("low, medium, high"), client.levelLabel("medium=medium_custom")], ["跟随自动匹配", "低 / 中 / 高", "自定义：medium=medium_custom"]);
@@ -175,36 +161,32 @@ if (typeof registration?.factory === "function") {
 	expect("cells: the chain's verdict is reported incl. the capacity 容量 cannot show", client.readoutOf(matched), "自动匹配：zai · 1M / 输出 128K · 有推理等级 · 视觉");
 	expect("cells: a declared row says so, on top of the match", client.readoutOf({ id: "x", declared: { reasoningEfforts: { low: "low" }, input: ["text"] }, matched: matched.matched }), "自动匹配：zai · 1M / 输出 128K · 有推理等级 · 视觉 · 已声明推理等级 low · 已声明视觉 关闭");
 	expect("cells: an unmatched row says capacity must be typed into 容量", client.readoutOf(unmatchedRow).startsWith("无匹配"), true);
-	expect("cells: capacity provenance is named, so 容量's route default cannot mislead", [client.capacityLine(matched).text, client.capacityLine(unmatchedRow).tone], ["容量：自动匹配 1M / 输出 128K · 来源 zai", "warn"]);
+	expect("cells: capacity provenance is named, so 容量's route default cannot mislead", [client.capacityText(matched.matched), client.readoutOf(unmatchedRow).startsWith("无匹配"), client.readoutOf(unmatchedRow).includes("容量")], ["1M / 输出 128K", true, true]);
 	expect("cells: nothing is dirty until it differs from the declaration", [client.isDirty(matched, { levels: "", vision: "follow" }), client.isDirty(matched, { levels: "low", vision: "follow" }), client.isDirty(unmatchedRow, { levels: "low", vision: "off" })], [false, true, false]);
 	expect("cells: a declared row starts on its own declaration, not on the match", [client.initialChoice(unmatchedRow).levels, client.presetOf(client.initialChoice(unmatchedRow).levels), client.initialChoice(unmatchedRow).vision], ["low", client.CUSTOM, "off"]);
 	/* The cell as rendered: the whole point of the rework is that nothing here is a
 	 * platform control any more. Walk the element tree the React shim produced. */
 	const walk = (node, visit) => {
-		/* The shim keeps a single array child as one entry, so flatten as we go. */
-		if (Array.isArray(node)) {
-			for (const child of node) walk(child, visit);
-			return;
-		}
-		if (node === null || node === undefined || typeof node !== "object") return;
-		visit(node);
-		for (const child of Array.isArray(node.children) ? node.children : []) walk(child, visit);
+		for (const element of walkElements(node)) visit(element);
 	};
 	const nodes = [];
 	const bareRow = { id: "probe/glm-5.3", declared: {}, matched: { route: "zai", contextWindow: 1000000, maxTokens: 131072, reasoning: true, input: ["text", "image"] } };
-	walk(client.Cell({ row: bareRow, choice: client.initialChoice(bareRow), classes: { control: "page-input" }, message: undefined, busy: false, onChoice: () => {}, onCommit: () => {} }), (node) => nodes.push(node));
+	walk(client.Cell({ row: bareRow, choice: client.initialChoice(bareRow), classes: { control: "page-input" }, message: undefined, busy: false, dirty: false, onChoice: () => {}, onCommit: () => {} }), (node) => nodes.push(node));
 	/* A Menu element is identified by its props: the component is DSH's, not ours. */
 	const isMenu = (node) => node.props !== undefined && node.props.items !== undefined && node.props.anchor !== undefined;
 	const types = nodes.map((node) => node.type);
 	expect("cells: nothing in the cell is a platform control", types.some((type) => type === "select" || type === "option"), false);
 	expect("cells: both pickers are DSH's Menu", nodes.filter(isMenu).length, 2);
+	expect("cells: the menu escapes the card's scroll container", nodes.filter(isMenu).every((node) => node.props.portal === true), true);
+	expect("cells: a picker announces that it opens a menu, and whether it is open", (() => { const trigger = nodes.filter(isMenu)[0].props.anchor.props; return [trigger["aria-haspopup"], trigger["aria-expanded"]]; })(), ["menu", false]);
+	expect("cells: the row's status line is a live region a screen reader will read", (() => { const note = nodes.find((node) => node.type === "p"); return [note.props.role, note.props["aria-live"], note.props.tabIndex]; })(), ["status", "polite", -1]);
 	const levelMenu = nodes.find((node) => isMenu(node) && node.props.items.some((item) => item.id === client.CUSTOM));
 	expect("cells: the level menu carries the presets, a separator and 自定义…", [levelMenu.props.items.length, levelMenu.props.items.at(-1), levelMenu.props.items.at(-2).type], [client.LEVEL_PRESETS.length + 2, { id: client.CUSTOM, label: "自定义…" }, "separator"]);
 	expect("cells: the menu marks what is currently chosen", [levelMenu.props.selectedId, levelMenu.props.open], ["", false]);
 	expect("cells: the trigger is the page's own input widget", levelMenu.props.anchor.props.className, "page-input");
 	expect("cells: the chain's verdict is printed under the pickers", nodes.some((node) => node.type === "p" && String(node.children?.[0] ?? "").startsWith("自动匹配：zai")), true);
 	expect("cells: an untouched row offers no write button", nodes.some((node) => node.type === "button" && node.children?.[0] === "写入"), false);
-	const dirtyRow = client.Cell({ row: bareRow, choice: { levels: "low", vision: "follow" }, classes: { control: "page-input", action: "page-button" }, message: undefined, busy: false, onChoice: () => {}, onCommit: () => {} });
+	const dirtyRow = client.Cell({ row: bareRow, choice: { levels: "low", vision: "follow" }, classes: { control: "page-input", action: "page-button" }, message: undefined, busy: false, dirty: true, onChoice: () => {}, onCommit: () => {} });
 	const dirtyNodes = [];
 	walk(dirtyRow, (node) => dirtyNodes.push(node));
 	const write = dirtyNodes.find((node) => node.type === "button" && node.children?.[0] === "写入");
@@ -212,17 +194,13 @@ if (typeof registration?.factory === "function") {
 	expect("cells: choosing 自定义… reveals the text field instead of a platform input", client.LEVEL_PRESETS.every(([value]) => value !== client.CUSTOM), true);
 }
 
-delete globalThis.window;
-
 /*
  * 4: the host route the panel fetches, driven end to end with a synthetic
  * settings document and snapshot so the assertions do not depend on the live one.
  */
-const WORK = join(HERE, ".panel");
-rmSync(WORK, { recursive: true, force: true });
-mkdirSync(WORK, { recursive: true });
-process.env.DSH_PI_AI_SETTINGS_FILE = join(WORK, "settings.yaml");
-process.env.DSH_PI_AI_CATALOG_SNAPSHOT = join(WORK, "snapshot.json");
+const WORK = sandbox("panel");
+process.env.DSH_PI_AI_SETTINGS_FILE = WORK.file("settings.yaml");
+process.env.DSH_PI_AI_CATALOG_SNAPSHOT = WORK.file("snapshot.json");
 process.env.DSH_PI_AI_CATALOG_REFRESH = "0";
 writeFileSync(process.env.DSH_PI_AI_SETTINGS_FILE, [
 	"llm-pi-ai:",
@@ -273,10 +251,97 @@ if (routes.length === 1) {
 	routes[0].handler({ method: "POST" }, refused);
 	expect("the route refuses anything but GET/HEAD", refused.status, 405);
 }
-rmSync(WORK, { recursive: true, force: true });
 
-console.log(`${String(checks - failures.length)}/${String(checks)} panel assertions passed`);
-if (failures.length > 0) {
-	for (const failure of failures) console.log(`FAIL ${failure}`);
-	process.exit(1);
+/*
+ * 5: the panel route's own rules, which need a process to themselves: the switch
+ * that turns the route off and the Host allowlist are read once, at load.
+ *
+ * The route is the one place this plugin answers a request from outside its own
+ * code, so what it refuses matters as much as what it returns: cross-site and
+ * cross-origin requests are refused (a page on another origin must not be able to
+ * read which models are configured), a 405 says what it does accept, and a HEAD
+ * carries the length of the body it did not send.
+ */
+const PROBE_SOURCE = `
+import { mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const [pluginPath, work] = process.argv.slice(2);
+mkdirSync(work, { recursive: true });
+process.env.DSH_PI_AI_SETTINGS_FILE = work + "/settings.yaml";
+process.env.DSH_PI_AI_CATALOG_SNAPSHOT = work + "/snapshot.json";
+process.env.DSH_PI_AI_CATALOG_REFRESH = "0";
+writeFileSync(process.env.DSH_PI_AI_SETTINGS_FILE, "llm-pi-ai:\\n  providers:\\n    probe-route:\\n      api: openai-responses\\n      baseURL: http://127.0.0.1:1/v1\\n      models:\\n        - id: probe-route/zephyr-9-pro\\n");
+writeFileSync(process.env.DSH_PI_AI_CATALOG_SNAPSHOT, JSON.stringify({ fetchedAt: new Date().toISOString(), source: "probe", providers: 0, count: 0, models: {} }));
+const routes = [];
+const plugin = await import(pathToFileURL(pluginPath).href);
+plugin.apply({
+	get: () => undefined,
+	logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+	inject: (names, callback) => {
+		if (Array.isArray(names) && names.includes("webServer")) callback({ webServer: { register: (route) => { routes.push(route); return () => {}; } }, effect: (fn) => fn() });
+	}
+});
+const answer = (request) => new Promise((resolve) => {
+	if (routes.length === 0) {
+		resolve(null);
+		return;
+	}
+	const chunks = [];
+	const res = {
+		writeHead: (status, headers) => { res.status = status; res.headers = headers ?? {}; },
+		end: (body) => { if (body !== undefined) chunks.push(String(body)); resolve({ status: res.status, headers: res.headers, body: chunks.join("") }); }
+	};
+	routes[0].handler(request, res);
+});
+const host = { host: "app.example" };
+console.log(JSON.stringify({
+	registered: routes.length,
+	get: await answer({ method: "GET", url: "/model-metadata/matrix?provider=probe-route", headers: host }),
+	head: await answer({ method: "HEAD", url: "/model-metadata/matrix", headers: host }),
+	post: await answer({ method: "POST", url: "/model-metadata/matrix", headers: host }),
+	crossSite: await answer({ method: "GET", url: "/model-metadata/matrix", headers: { ...host, "sec-fetch-site": "cross-site" } }),
+	foreignOrigin: await answer({ method: "GET", url: "/model-metadata/matrix", headers: { ...host, origin: "https://elsewhere.example" } }),
+	sameOrigin: await answer({ method: "GET", url: "/model-metadata/matrix", headers: { ...host, origin: "http://app.example" } })
+}));
+`;
+
+/**
+ * Drive the route in a child process, so the load-time switches can be varied.
+ * @param env - extra environment for the child.
+ * @param tag - a sandbox directory name for this run.
+ * @param expectRoute - whether this run is supposed to register the route at all.
+ * @returns the child's JSON report.
+ */
+function routeProbe(env, tag, expectRoute = true) {
+	const script = WORK.write(`probe-${tag}.mjs`, PROBE_SOURCE);
+	const result = spawnSync(process.execPath, [script, PLUGIN, WORK.file(`work-${tag}`)], { encoding: "utf8", env: { ...process.env, ...env } });
+	const line = (result.stdout ?? "").trim().split("\n").pop();
+	if (result.status !== 0 || line === undefined) throw new Error(`route probe failed: ${result.stderr || result.stdout}`);
+	const report = JSON.parse(line);
+	/* The route is registered by apply(), which returns early when the pi-ai adapter
+	 * cannot be loaded — so a machine without a DSH install gets zero routes, and the
+	 * assertions below would report a null dereference instead of the real reason. */
+	if (expectRoute && report.registered === 0) {
+		throw new Error("the route probe registered nothing: this suite needs a DSH install to load the pi-ai adapter (set DSH_INSTALL to the directory that holds it)");
+	}
+	return report;
 }
+
+const plain = routeProbe({}, "plain");
+expect("the panel route is registered exactly once", plain.registered, 1);
+expect("a normal request is answered", [plain.get.status, JSON.parse(plain.get.body).routes.map((route) => route.route)], [200, ["probe-route"]]);
+expect("the body is not sniffable as anything else", plain.get.headers["x-content-type-options"], "nosniff");
+expect("HEAD carries the length of the body it does not send", [plain.head.status, Number(plain.head.headers["content-length"]) > 0, plain.head.body], [200, true, ""]);
+expect("a write is refused, and the refusal says what is accepted", [plain.post.status, plain.post.headers.allow], [405, "GET, HEAD"]);
+expect("a page on another origin cannot read it", plain.crossSite.status, 403);
+expect("nor a request that claims the data for another origin", plain.foreignOrigin.status, 403);
+expect("the app's own page still can", plain.sameOrigin.status, 200);
+const off = routeProbe({ DSH_PI_AI_CATALOG_PANEL: "off" }, "off", false);
+expect("DSH_PI_AI_CATALOG_PANEL=off registers no route at all", off.registered, 0);
+const hostBound = routeProbe({ DSH_PI_AI_CATALOG_PANEL_HOSTS: " app.example , other.example " }, "hosts");
+expect("a configured host is answered", hostBound.get.status, 200);
+expect("and one that was not configured is not", routeProbe({ DSH_PI_AI_CATALOG_PANEL_HOSTS: "other.example" }, "hosts-miss").get.status, 403);
+
+WORK.clean();
+
+finish();

@@ -5,7 +5,7 @@
  * Opt-in (it needs the running server and momentarily adds one throwaway provider
  * to settings.yaml, which it restores byte-for-byte):
  *
- *   node tests/new-route.mjs [--url <app url>] [--card <provider>]
+ *   node tests/new-route.mjs [--url <app url>]
  *                            # 或 DSH_UNIT=<your systemd unit> 从 journal 里取 URL
  *
  * It answers the question at the three layers that matter, for a route nobody has
@@ -21,22 +21,26 @@
  *      the same verdict the fused readout prints.
  *   3. UI: the live page grows a card for the new route, and that card's editor
  *      rows carry the fused controls with the right readouts.
+ *
+ * The page is driven through the shared CDP helper (`tests/cdp.mjs`); the exit code is
+ * the verdict: 0 when all three layers answered, 2 when one of them failed.
  */
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromePath, dshInstall } from "../dev-paths.mjs";
+import { adapterEntry } from "../dev-paths.mjs";
+import { appUrl, openPage, sleep } from "./cdp.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DSH = dshInstall();
-const CHROME = chromePath();
 const HOME = process.env.DSH_HOME ?? join(process.env.HOME, ".dsh");
 const SETTINGS = join(HOME, "settings.yaml");
 const BACKUP = `${SETTINGS}.new-route-backup`;
 const ROUTE = "zzprobe";
 const MODELS = ["zzprobe/glm-5.3", "zzprobe/claude-opus-4-6", "zzprobe/whatever-9000"];
+/* Resolve the app URL before anything else: the steps below write the throwaway route
+ * into settings.yaml, and a run that cannot reach a page has no business doing that. */
+const url = appUrl();
 
 const original = readFileSync(SETTINGS);
 copyFileSync(SETTINGS, BACKUP);
@@ -87,9 +91,11 @@ mkdirSync(WORK, { recursive: true });
 const copy = join(WORK, "settings.yaml");
 writeFileSync(copy, lines.join("\n"));
 try {
+	/* Resolved inside the try: without the adapter installed, that is this step's answer,
+	 * not a reason for the whole tool to stop before its host and UI checks. */
 	const raw = execFileSync("node", [
 		join(HERE, "..", "test-fallback.mjs"),
-		"--source", join(DSH, "node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js"),
+		"--source", adapterEntry(),
 		"--plugin", join(HERE, "..", "lib/index.mjs"),
 		"--settings", copy,
 		"--provider", ROUTE,
@@ -112,19 +118,7 @@ try {
 }
 rmSync(WORK, { recursive: true, force: true });
 
-/* 2. the live plugin's own verdict — the fused readout's source. The app URL comes from
- * --url, or from the journal of the unit named by DSH_UNIT: no unit name is universal. */
-function resolveUrl() {
-	const given = option("--url", undefined);
-	if (given !== undefined) return given;
-	const unit = process.env.DSH_UNIT;
-	if (unit === undefined) throw new Error('pass --url "http://127.0.0.1:3080/?token=…", or set DSH_UNIT to your systemd unit name');
-	const line = execFileSync("journalctl", ["--user", "-u", unit, "--no-pager"], { encoding: "utf8" });
-	const matches = [...line.matchAll(/dsh web: (http:\S+token=\S+)/gu)];
-	if (matches.length === 0) throw new Error(`no launch URL in the journal of "${unit}"; pass --url instead`);
-	return matches[matches.length - 1][1];
-}
-const url = resolveUrl();
+/* 2. the live plugin's own verdict — the fused readout's source. */
 try {
 	const payload = await (await fetch(`${new URL(url).origin}/model-metadata/matrix?provider=${ROUTE}`)).json();
 	const found = payload.routes.find((entry) => entry.route === ROUTE);
@@ -137,71 +131,14 @@ try {
 }
 
 /* 3. the live page: a card for the new route, with fused cells in its editor. */
-const require = createRequire(join(DSH, "node_modules", "noop.js"));
-const { WebSocket } = require("ws");
-const port = 9337;
-const profile = join(HERE, ".browser-profile-newroute");
-rmSync(profile, { recursive: true, force: true });
-mkdirSync(profile, { recursive: true });
-/* A crash must not leave a Chromium profile (and its device ids) inside the repository. */
-process.on("exit", () => rmSync(profile, { recursive: true, force: true }));
-const chrome = spawn(CHROME, ["--headless=new", `--remote-debugging-port=${String(port)}`, `--user-data-dir=${profile}`, "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--window-size=1400,1000", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
-chrome.stderr.on("data", () => {});
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-let socket;
+let session;
 try {
-	let debuggerUrl;
-	for (let attempt = 0; attempt < 100 && debuggerUrl === undefined; attempt++) {
-		try {
-			const targets = await (await fetch(`http://127.0.0.1:${String(port)}/json/list`)).json();
-			debuggerUrl = targets.find((target) => target.type === "page")?.webSocketDebuggerUrl;
-		} catch {
-			/* not up yet */
-		}
-		if (debuggerUrl === undefined) await sleep(200);
-	}
-	socket = new WebSocket(debuggerUrl);
-	await new Promise((resolve, reject) => {
-		socket.once("open", resolve);
-		socket.once("error", reject);
-	});
-	let nextId = 0;
-	const pending = new Map();
-	const errors = [];
-	socket.on("message", (raw) => {
-		const message = JSON.parse(String(raw));
-		if (message.id !== undefined) {
-			const waiter = pending.get(message.id);
-			if (waiter !== undefined) {
-				pending.delete(message.id);
-				message.error === undefined ? waiter.resolve(message.result) : waiter.reject(new Error(JSON.stringify(message.error)));
-			}
-			return;
-		}
-		if (message.method === "Runtime.exceptionThrown") errors.push(String(message.params.exceptionDetails.exception?.description ?? message.params.exceptionDetails.text));
-	});
-	const send = (method, params = {}) => new Promise((resolve, reject) => {
-		const id = ++nextId;
-		pending.set(id, { resolve, reject });
-		socket.send(JSON.stringify({ id, method, params }));
-	});
-	const evaluate = async (expression) => (await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result?.value;
-	await send("Page.enable");
-	await send("Runtime.enable");
-	await send("Page.navigate", { url });
-	for (let attempt = 0; attempt < 60 && (await evaluate("document.readyState")) !== "complete"; attempt++) await sleep(250);
-	await sleep(2500);
-	const click = async (text) => evaluate(`(() => {
-		const hit = [...document.querySelectorAll("button, a, li, div, span, p")].find((node) => node.children.length === 0 && node.textContent.trim() === ${JSON.stringify(text)});
-		if (hit === undefined) return false;
-		hit.click();
-		return true;
-	})()`);
-	await click("设置");
+	session = await openPage(url, { port: 9337, profile: join(HERE, ".browser-profile-newroute") });
+	await session.click("设置");
 	await sleep(1500);
-	await click("模型");
+	await session.click("模型");
 	await sleep(3000);
-	report.ui = await evaluate(`(async () => {
+	report.ui = await session.evaluate(`(async () => {
 		const card = [...document.querySelectorAll("li")].find((node) => node.textContent.includes(${JSON.stringify(ROUTE)}));
 		if (card === undefined) return { card: false };
 		const button = [...card.querySelectorAll("button")].find((node) => node.textContent.trim() === "编辑");
@@ -216,14 +153,25 @@ try {
 			modelIds: [...card.querySelectorAll("input")].map((node) => node.value).filter((value) => value.startsWith("zzprobe/"))
 		};
 	})()`);
-	report.ui.errors = errors;
+	report.ui.errors = session.exceptions;
 } catch (error) {
 	report.ui = { failure: error instanceof Error ? error.message : String(error) };
 } finally {
-	socket?.close();
-	chrome.kill("SIGKILL");
-	rmSync(profile, { recursive: true, force: true });
+	session?.close();
 }
 
 console.log(JSON.stringify(report, null, 2));
 restore();
+
+/*
+ * The verdict, as an exit code: a run whose adapter, host or page step failed has not
+ * answered the question this tool asks, and exiting 0 said it had.
+ */
+const answered = typeof report.adapter?.failure === "undefined"
+	&& typeof report.host?.failure === "undefined"
+	&& typeof report.ui?.failure === "undefined"
+	&& report.ui?.card === true;
+console.log(answered
+	? "VERDICT ok: the adapter, the host route and the new card's editor all answered"
+	: `VERDICT negative: adapter=${report.adapter?.failure === undefined ? "ok" : "failed"} host=${report.host?.failure === undefined ? "ok" : "failed"} ui=${report.ui?.failure === undefined ? (report.ui?.card === true ? "ok" : "no card") : "failed"}`);
+if (!answered) process.exitCode = 2;

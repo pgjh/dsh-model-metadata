@@ -1,4 +1,9 @@
 node_modules/
 *.tgz
-# test scratch directories (each suite removes its own, but a crashed run may leave one)
-tests/.*/
+
+# Scratch only the opt-in browser tools keep inside tests/: a Chromium profile and the
+# throwaway setting document they lend to a probe route. Each removes its own on exit,
+# so this only matters for a run that was interrupted before it could.
+tests/.browser-profile*/
+tests/.live-refresh/
+tests/.newroute/

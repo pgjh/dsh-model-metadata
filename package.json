@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-metadata",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Capability metadata for hand-declared gateway models, resolved at runtime by bare model name (context window, output cap, reasoning levels, vision) — matched against the official DeepSeek route's catalog, the installed pi-ai catalog, opencode and models.dev, without writing to your settings.",
   "author": "mx_ (https://www.npmjs.com/~mx_)",
   "license": "MIT",
@@ -27,12 +27,17 @@
   "files": [
     "lib/index.mjs",
     "lib/client.js",
+    "lib/names.mjs",
     "lib/panel.mjs",
     "lib/snapshot.mjs",
     "lib/refresh-snapshot.mjs",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "CHANGELOG.md",
+    "LICENSE",
+    "install-plugin.mjs",
+    "packaging.mjs",
+    "dev-paths.mjs"
   ],
   "dsh": {
     "bundle": {
@@ -60,7 +65,8 @@
   ],
   "scripts": {
     "verify": "node verify.mjs",
-    "test": "node verify.mjs && node tests/panel.mjs && node tests/hot-snapshot.mjs && node tests/refresh-policy.mjs"
+    "test": "node verify.mjs",
+    "test:unit": "node tests/unit.mjs && node tests/install-plugin.mjs && node tests/refresh-policy.mjs"
   },
   "publishConfig": {
     "access": "public",

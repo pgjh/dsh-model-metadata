@@ -6,7 +6,8 @@
  * Chromium build, and it mutates the real settings document for a moment):
  *
  *   node tests/fusion-write.mjs                 # newest launch token from journalctl
- *   node tests/fusion-write.mjs --card <provider> --keep   # default: the first provider card
+ *   node tests/fusion-write.mjs --card <provider>   # default: the first provider card
+ *   node tests/fusion-write.mjs --keep              # leave the written value in place
  *
  * It backs up settings.yaml, drives the real UI (设置 → 模型 → 编辑 → the first model
  * row's fused 推理等级 control → 写入), then reports:
@@ -14,64 +15,34 @@
  *   - whether the host's matrix route now reports the declaration (i.e. the write
  *     reached the settings layer and came back through the resolver);
  *   - whether the write touched anything else in `models[]`.
- * settings.yaml is restored byte-for-byte before the process exits, on any path.
+ * settings.yaml is restored byte-for-byte before the process exits, on any path, unless
+ * `--keep` asks for the written value to stay (then the pre-write copy stays beside it).
+ * The verdict is the exit code: 0 when a pending edit really went in and the row became
+ * clean again, 2 when it did not.
+ *
+ * The page is driven through the shared CDP helper (`tests/cdp.mjs`).
  */
-import { execFileSync, spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
+import { copyFileSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromePath, dshInstall } from "../dev-paths.mjs";
+import { appUrl, flag, openPage, option, sleep } from "./cdp.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DSH = dshInstall();
-const CHROME = chromePath();
-const require = createRequire(join(DSH, "node_modules", "noop.js"));
-const { WebSocket } = require("ws");
 const HOME = process.env.DSH_HOME ?? join(process.env.HOME, ".dsh");
 const SETTINGS = join(HOME, "settings.yaml");
 const BACKUP = `${SETTINGS}.fusion-write-backup`;
 
-const argv = process.argv.slice(2);
-const option = (name, fallback) => {
-	const at = argv.indexOf(name);
-	return at === -1 ? fallback : argv[at + 1];
-};
-
-/**
- * The launch URL, from `--url` or from the journal of the unit named by `DSH_UNIT`.
- * Naming the unit is required because no unit name is universal.
- * @returns the tokenised app URL.
- */
-function tokenUrl() {
-	const unit = process.env.DSH_UNIT;
-	const line = execFileSync("journalctl", ["--user", "-u", unit, "--no-pager"], { encoding: "utf8" });
-	const matches = [...line.matchAll(/dsh web: (http:\S+token=\S+)/gu)];
-	if (matches.length === 0) throw new Error(`no launch URL in the journal of "${String(unit)}"; pass --url instead`);
-	return matches[matches.length - 1][1];
-}
-
-/** Resolve the URL, and say what to do when the unit was not named. */
-function resolveUrl() {
-	const given = option("--url", undefined);
-	if (given !== undefined) return given;
-	if (process.env.DSH_UNIT === undefined) {
-		throw new Error("pass --url \"http://127.0.0.1:3080/?token=…\", or set DSH_UNIT to your systemd unit name to read it from the journal");
-	}
-	return tokenUrl();
-}
-const url = resolveUrl();
+const url = appUrl();
 /* Empty unless asked: whatever provider the deployment's first card holds. */
 let card = option("--card", "");
-const port = Number(option("--port", "9335"));
-const keep = argv.includes("--keep");
+const keep = flag("--keep");
 
 /* Back up first: nothing below may leave the user's settings changed. */
 const original = readFileSync(SETTINGS);
 copyFileSync(SETTINGS, BACKUP);
 let restored = false;
 const restore = () => {
-	if (restored) return;
+	if (restored || keep) return;
 	restored = true;
 	try {
 		copyFileSync(BACKUP, SETTINGS);
@@ -90,88 +61,16 @@ process.on("SIGINT", () => {
 	process.exit(130);
 });
 
-const profile = join(HERE, ".browser-profile-write");
-rmSync(profile, { recursive: true, force: true });
-mkdirSync(profile, { recursive: true });
-/* A crash must not leave a Chromium profile (and its device ids) inside the repository. */
-process.on("exit", () => rmSync(profile, { recursive: true, force: true }));
-const chrome = spawn(CHROME, [
-	"--headless=new",
-	`--remote-debugging-port=${String(port)}`,
-	`--user-data-dir=${profile}`,
-	"--no-sandbox",
-	"--disable-gpu",
-	"--disable-dev-shm-usage",
-	"--window-size=1400,1000",
-	"about:blank"
-], { stdio: ["ignore", "ignore", "pipe"] });
-chrome.stderr.on("data", () => {});
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** Wait for the DevTools HTTP endpoint to answer. */
-async function debuggerUrl() {
-	for (let attempt = 0; attempt < 100; attempt++) {
-		try {
-			const response = await fetch(`http://127.0.0.1:${String(port)}/json/list`);
-			const targets = await response.json();
-			const page = targets.find((target) => target.type === "page");
-			if (page?.webSocketDebuggerUrl !== undefined) return page.webSocketDebuggerUrl;
-		} catch {
-			/* not up yet */
-		}
-		await sleep(200);
-	}
-	throw new Error("chromium never exposed a page target");
-}
-
-const socket = new WebSocket(await debuggerUrl());
-await new Promise((resolve, reject) => {
-	socket.once("open", resolve);
-	socket.once("error", reject);
+const session = await openPage(url, {
+	port: option("--port", "9335"),
+	profile: join(HERE, ".browser-profile-write"),
+	readyMs: 2500
 });
-let nextId = 0;
-const pending = new Map();
-const logs = [];
-socket.on("message", (raw) => {
-	const message = JSON.parse(String(raw));
-	if (message.id !== undefined) {
-		const waiter = pending.get(message.id);
-		if (waiter !== undefined) {
-			pending.delete(message.id);
-			message.error === undefined ? waiter.resolve(message.result) : waiter.reject(new Error(JSON.stringify(message.error)));
-		}
-		return;
-	}
-	if (message.method === "Runtime.exceptionThrown") logs.push(String(message.params.exceptionDetails.exception?.description ?? message.params.exceptionDetails.text));
-	else if (message.method === "Runtime.consoleAPICalled") logs.push(`[${String(message.params.type)}] ${message.params.args.map((arg) => String(arg.value ?? arg.description ?? arg.type)).join(" ")}`);
-});
-const send = (method, params = {}) => new Promise((resolve, reject) => {
-	const id = ++nextId;
-	pending.set(id, { resolve, reject });
-	socket.send(JSON.stringify({ id, method, params }));
-});
-const evaluate = async (expression) => (await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result?.value;
+const { evaluate } = session;
 
-await send("Page.enable");
-await send("Runtime.enable");
-await send("Page.navigate", { url });
-for (let attempt = 0; attempt < 60 && (await evaluate("document.readyState")) !== "complete"; attempt++) await sleep(250);
-await sleep(2500);
-
-/** Click the first leaf element whose trimmed text matches exactly. */
-const click = async (text) => evaluate(`(() => {
-	const wanted = ${JSON.stringify(text)};
-	const all = [...document.querySelectorAll("button, a, li, div, span, p")];
-	const hit = all.find((node) => node.children.length === 0 && node.textContent.trim() === wanted);
-	if (hit === undefined) return false;
-	hit.click();
-	return true;
-})()`);
-
-await click("设置");
+await session.click("设置");
 await sleep(1500);
-await click("模型");
+await session.click("模型");
 await sleep(2500);
 
 const opened = await evaluate(`(async () => {
@@ -221,23 +120,32 @@ const setting = await evaluate(`(async () => {
 	if (cell === null) return { found: false };
 	const trigger = cell.querySelector("button[aria-haspopup='menu']");
 	if (trigger === null) return { found: true, trigger: false };
-	const before = trigger.textContent.trim();
+	/* The 写入 control exists only while the row differs from what is stored, so its
+	 * presence *is* the dirty signal. Its inline style is empty whenever it is rendered,
+	 * which is what made the old \`style.display !== "none"\` check true by construction. */
+	const writeButton = () => [...cell.querySelectorAll("button")].find((node) => node.textContent.trim() === "写入");
+	const noteOf = () => cell.lastElementChild?.querySelector("p")?.textContent?.trim();
+	const beforeLabel = trigger.textContent.trim();
+	const cleanBefore = writeButton() === undefined;
+	const readoutBefore = noteOf();
 	trigger.click();
 	await new Promise((resolve) => setTimeout(resolve, 500));
 	const items = [...document.querySelectorAll("[role='menuitem'],[role='menuitemradio'],li")].filter((node) => node.offsetParent !== null);
 	const labels = items.map((node) => node.textContent.trim());
-	const item = items.find((node) => node.textContent.trim() === ${JSON.stringify("关闭 / 低 / 中 / 高")});
+	const item = items.find((node) => node.textContent.trim() === ${JSON.stringify(WANTED_LABEL)});
 	if (item === undefined) return { found: true, trigger: true, picked: false, labels: labels.slice(-10) };
 	item.click();
 	await new Promise((resolve) => setTimeout(resolve, 300));
-	const write = [...cell.querySelectorAll("button")].find((node) => node.textContent.trim() === "写入");
 	return {
 		found: true,
 		trigger: true,
 		picked: true,
-		before,
-		after: trigger.textContent.trim(),
-		dirty: write !== undefined && write.style.display !== "none",
+		beforeLabel,
+		readoutBefore,
+		afterLabel: trigger.textContent.trim(),
+		labelChanged: trigger.textContent.trim() !== beforeLabel,
+		cleanBefore,
+		dirtyAppeared: writeButton() !== undefined,
 		model: cell.parentElement?.children?.[0]?.children?.[0]?.value
 	};
 })()`);
@@ -247,11 +155,11 @@ const settled = await evaluate(`(() => {
 	const cell = document.querySelector("[data-model-metadata-cell]");
 	const trigger = cell.querySelector("button[aria-haspopup='menu']");
 	const write = [...cell.querySelectorAll("button")].find((node) => node.textContent.trim() === "写入");
-	return { value: trigger.textContent.trim(), dirty: write !== undefined && write.style.display !== "none" };
+	return { value: trigger.textContent.trim(), dirty: write !== undefined };
 })()`);
 
 let outcome = { skipped: "no cell found" };
-if (setting.found === true && setting.dirty === true) {
+if (setting.found === true && setting.dirtyAppeared === true) {
 	const clicked = await evaluate(`(() => {
 		const cell = document.querySelector("[data-model-metadata-cell]");
 		[...cell.querySelectorAll("button")].find((node) => node.textContent.trim() === "写入").click();
@@ -261,11 +169,10 @@ if (setting.found === true && setting.dirty === true) {
 	const noteRightAfter = await evaluate(`document.querySelector("[data-model-metadata-cell]")?.lastElementChild?.querySelector("p")?.textContent`);
 	await sleep(2000);
 	const storedAfter = (await matrixOf(card)).models[0].stored;
-	const note = await evaluate(`document.querySelector("[data-model-metadata-cell]")?.lastElementChild?.querySelector("p")?.textContent`);
-	const stillDirty = await evaluate(`(() => {
+	const finished = await evaluate(`(() => {
 		const cell = document.querySelector("[data-model-metadata-cell]");
 		const write = [...cell.querySelectorAll("button")].find((node) => node.textContent.trim() === "写入");
-		return write !== undefined && write.style.display !== "none";
+		return { note: cell.lastElementChild?.querySelector("p")?.textContent?.trim(), dirty: write !== undefined };
 	})()`);
 	const keys = (entry) => Object.keys(entry).sort();
 	outcome = {
@@ -274,20 +181,36 @@ if (setting.found === true && setting.dirty === true) {
 		clicked,
 		noteRightAfter,
 		matches: JSON.stringify(storedAfter.reasoningEfforts) === JSON.stringify({ off: null, low: "low", medium: "medium", high: "high" }),
-		note,
-		dirtyCleared: stillDirty === false,
-		report: note,
+		note: finished.note,
+		/* The control is rendered only while the row is dirty: it had to be absent before
+		 * the pick, present after it, and absent again once the write settled. */
+		cleanBefore: setting.cleanBefore === true,
+		dirtyAppeared: setting.dirtyAppeared === true,
+		dirtyCleared: finished.dirty === false,
+		readoutBefore: setting.readoutBefore,
+		readoutChanged: finished.note !== setting.readoutBefore,
+		noteSaysWritten: typeof finished.note === "string" && finished.note.includes("已写入"),
+		report: finished.note,
 		keysBefore: keys(storedBefore),
 		keysAfter: keys(storedAfter),
 		capacityUntouched: storedAfter.contextWindow === storedBefore.contextWindow && storedAfter.maxTokens === storedBefore.maxTokens
 	};
 }
 
-console.log(JSON.stringify({ url, card, opened, setting, settled, outcome, errors: logs.filter((line) => /catalog|Cannot|Error/u.test(line)) }, null, 2));
-socket.close();
-chrome.kill("SIGKILL");
-rmSync(profile, { recursive: true, force: true });
+const report = { url, card, opened, setting, settled, outcome, errors: session.logs.filter((line) => /catalog|Cannot|Error/u.test(line)) };
+console.log(JSON.stringify(report, null, 2));
+session.close();
 
-/* Report the file's own state, then restore. */
+/* Report the file's own state, then restore (or keep, when that is what was asked). */
 restore();
-if (!existsSync(CHROME)) process.exit(2);
+if (keep) console.log(`--keep: ${SETTINGS} keeps the written value; the pre-write copy is ${BACKUP}`);
+
+/*
+ * The verdict, as an exit code: the tool exists to catch a fused control that stops
+ * writing, and printing JSON while exiting 0 reported every such run as a success.
+ */
+const proved = outcome.matches === true && outcome.readoutChanged === true && outcome.dirtyAppeared === true && outcome.dirtyCleared === true && outcome.capacityUntouched === true;
+console.log(proved
+	? "VERDICT ok: the pending edit landed in settings, the row's readout followed it, and the row went clean again"
+	: `VERDICT negative: ${outcome.skipped ?? `matches=${String(outcome.matches)} readoutChanged=${String(outcome.readoutChanged)} dirtyAppeared=${String(outcome.dirtyAppeared)} dirtyCleared=${String(outcome.dirtyCleared)} capacityUntouched=${String(outcome.capacityUntouched)}`}`);
+if (!proved) process.exitCode = 2;

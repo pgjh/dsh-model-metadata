@@ -12,27 +12,31 @@
  * (the same "new object identity" a settings edit produces), and a model that
  * only exists in the second config is resolved through the SAME instance.
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { adapterEntry, nodeModulesDir } from "../dev-paths.mjs";
+import { adapterEntry } from "../dev-paths.mjs";
+import { quietLogger, sandbox, suite } from "./harness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN = join(HERE, "..", "lib/index.mjs");
 
 /* A settings file the plugin can read (declarations win over matches). */
-const WORK = join(HERE, ".hot-add");
-mkdirSync(WORK, { recursive: true });
-const settings = join(WORK, "settings.yaml");
+const WORK = sandbox("hot-add");
+const settings = WORK.file("settings.yaml");
 writeFileSync(settings, "llm-pi-ai:\n  providers: {}\n");
 process.env.DSH_PI_AI_SETTINGS_FILE = settings;
+/* Pinned like every other suite: run by hand on a machine with live data, this must
+ * judge the snapshot the test wrote, not whatever the user happens to have. */
+process.env.DSH_PI_AI_CATALOG_SNAPSHOT = WORK.file("snapshot.json");
+writeFileSync(process.env.DSH_PI_AI_CATALOG_SNAPSHOT, JSON.stringify({ fetchedAt: new Date().toISOString(), source: "test", providers: 0, count: 0, models: {} }));
 process.env.DSH_PI_AI_CATALOG_REFRESH = "0";
 
 const plugin = await import(pathToFileURL(PLUGIN).href);
 const { apply } = await import(pathToFileURL(adapterEntry()).href);
 
 const noop = () => {};
-const quiet = { debug: noop, info: noop, warn: noop, error: noop };
+const quiet = quietLogger();
 const captured = {};
 const ctx = {
 	get: () => undefined,
@@ -95,17 +99,11 @@ const added1 = await show("added ", "probe/deepseek-v41-flash");
 const added2 = await show("added ", "probe/DeepSeek-V4-Flash-Vision");
 const kept = await show("kept  ", "probe/glm-5.3");
 
-const failures = [];
-if (added1.contextWindow !== 1000000) failures.push(`v41-flash context: ${String(added1.contextWindow)} (wanted 1000000)`);
-if (added1.efforts?.join("/") !== "off/low/high/max") failures.push(`v41-flash levels: ${String(added1.efforts?.join("/"))}`);
-if (added2.contextWindow !== 1000000) failures.push(`Vision context: ${String(added2.contextWindow)} (wanted 1000000)`);
-if (added2.efforts?.join("/") !== "off/low/high/max") failures.push(`Vision levels: ${String(added2.efforts?.join("/"))}`);
-if (kept.contextWindow !== 1000000) failures.push(`glm-5.3 context: ${String(kept.contextWindow)}`);
-console.log("");
-if (failures.length === 0) console.log("PASS: models added at runtime are enriched without a restart");
-else {
-	console.log("FAIL:");
-	for (const failure of failures) console.log(`  ${failure}`);
-	process.exitCode = 1;
-}
-rmSync(WORK, { recursive: true, force: true });
+const { expect, finish } = suite("hot add");
+expect("a model added at runtime is enriched without a restart", added1.contextWindow, 1000000);
+expect("its reasoning levels arrive with it", added1.efforts?.join("/"), "off/low/high/max");
+expect("a second added model (the -exp spelling) is enriched too", added2.contextWindow, 1000000);
+expect("and carries the official route's levels", added2.efforts?.join("/"), "off/low/high/max");
+expect("a model that was already there keeps its metadata", kept.contextWindow, 1000000);
+WORK.clean();
+finish();

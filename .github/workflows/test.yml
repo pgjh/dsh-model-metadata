@@ -1,0 +1,48 @@
+# The two gates this repository has:
+#   1. the suites that need nothing but Node — no DSH install, no network, no browser;
+#   2. the full `npm test`, which needs a real DSH install because verify.mjs drives the
+#      installed pi-ai adapter and reads the catalog that ships with it.
+# No secret is used anywhere below: the DSH package comes from the public registry, and
+# nothing here needs a credential to run.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # `npm run test:unit` is the hermetic gate: unit + install-plugin + refresh-policy
+      # all run without a DSH install (refresh-policy stubs `fetch`, install-plugin
+      # composes a synthetic layout under the system temp directory).
+      - name: Suites that need no DSH install
+        run: npm run test:unit
+
+      # Why this install is needed: `npm test` runs verify.mjs, which imports the
+      # installed @deepseek-ai/dsh-llm-pi-ai adapter and the pi-ai catalog out of that
+      # install's node_modules; without it verify.mjs exits with "no adapter at …; set
+      # DSH_INSTALL …" instead of testing anything. It is a plain dependency tree from
+      # the public registry (checked: installs cleanly, no install-time credentials).
+      # If it ever fails on its own account — it pulls native optional dependencies
+      # (node-pty, koffi) — prefer adding `continue-on-error: true` to the step below and
+      # leaving the hermetic step above as the gate, rather than dropping the step.
+      - name: Install the public DSH package
+        run: npm install -g @deepseek-ai/dsh
+
+      - name: Full suite against the installed DSH
+        run: npm test

@@ -3,9 +3,15 @@
  * test-fallback.mjs — exercise one adapter build against a settings document
  * without starting a server, and print what DSH would resolve per model.
  *
- *   node test-fallback.mjs --source <…/dsh-llm-pi-ai/lib/index.js> \
+ *   node test-fallback.mjs [--source <…/dsh-llm-pi-ai/lib/index.js>] \
  *                          [--settings ~/.dsh/settings.yaml] [--provider my-gateway] \
- *                          [--json]
+ *                          [--json] [--json-out <file>]
+ *
+ * `--source` defaults to the installed adapter, found the same way the other tools
+ * find it, so the one-line invocation in the README works as written. The run gets
+ * a scratch snapshot of its own unless the caller names one, so nothing here can
+ * overwrite the data a running DSH is reading: this tool used to inherit the live
+ * snapshot path and its launch refresh, which meant one hand-run could rewrite it.
  *
  * The adapter file is copied into a throwaway mirror directory whose
  * `node_modules` symlinks the real install, so the copy imports the same
@@ -13,25 +19,43 @@
  * driven directly: `resolveModel()` for what the composer shows, and
  * `current().models.getModel()` for the full resolved descriptor.
  */
-import { existsSync, mkdirSync, rmdirSync, rmSync, symlinkSync, copyFileSync, readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, symlinkSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
+import { adapterEntry } from "./dev-paths.mjs";
+import { sandbox } from "./tests/harness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+/** Arguments that must be followed by a value. */
+const VALUED = ["--source", "--settings", "--provider", "--plugin", "--node-modules", "--json-out"];
+
 function parseArgs(argv) {
-	const options = { source: undefined, settings: undefined, provider: undefined, nodeModules: undefined, json: false };
+	const options = { source: undefined, settings: undefined, provider: undefined, nodeModules: undefined, json: false, jsonOut: undefined, refresh: false };
 	for (let at = 0; at < argv.length; at++) {
 		const arg = argv[at];
-		if (arg === "--source") options.source = argv[++at];
-		else if (arg === "--settings") options.settings = argv[++at];
-		else if (arg === "--provider") options.provider = argv[++at];
-		else if (arg === "--plugin") options.plugin = argv[++at];
-		else if (arg === "--node-modules") options.nodeModules = argv[++at];
-		else if (arg === "--json") options.json = true;
-		else {
+		if (arg === "--help") {
+			console.log("node test-fallback.mjs [--source <adapter.js>] [--settings <settings.yaml>] [--provider <route>] [--plugin <lib/index.mjs>] [--node-modules <dir>] [--json] [--json-out <file>] [--refresh]");
+			process.exit(0);
+		}
+		if (arg === "--json") options.json = true;
+		else if (arg === "--refresh") options.refresh = true;
+		else if (VALUED.includes(arg)) {
+			const value = argv[++at];
+			/* A flag whose value is missing must not fall back to a default: this tool
+			 * writes files, and a mis-read argument is a mis-directed write. */
+			if (value === undefined || value.startsWith("--")) {
+				console.error(`${arg} needs a value`);
+				process.exit(1);
+			}
+			if (arg === "--source") options.source = value;
+			else if (arg === "--settings") options.settings = value;
+			else if (arg === "--provider") options.provider = value;
+			else if (arg === "--plugin") options.plugin = value;
+			else if (arg === "--node-modules") options.nodeModules = value;
+			else options.jsonOut = value;
+		} else {
 			console.error(`unknown argument: ${arg}`);
 			process.exit(1);
 		}
@@ -41,15 +65,22 @@ function parseArgs(argv) {
 
 const options = parseArgs(process.argv.slice(2));
 options.plugin = options.plugin === undefined ? undefined : resolve(options.plugin);
-if (options.source === undefined) {
-	console.error("--source <…/dsh-llm-pi-ai/lib/index.js> is required");
-	process.exit(1);
-}
-const SOURCE = resolve(options.source);
+/* The scratch directory is created here, before anything reads an environment
+ * variable, so the defaults below can point into it. */
+const WORK = sandbox("fallback");
+const SOURCE = resolve(options.source ?? adapterEntry());
 if (!existsSync(SOURCE)) {
 	console.error(`no such adapter file: ${SOURCE}`);
 	process.exit(1);
 }
+if (process.env.DSH_PI_AI_CATALOG_SNAPSHOT === undefined || process.env.DSH_PI_AI_CATALOG_SNAPSHOT.length === 0) {
+	/* A run nobody configured gets its own empty catalog rather than the machine's:
+	 * the alternative is a diagnostic that silently judges against live data and can
+	 * replace it. */
+	process.env.DSH_PI_AI_CATALOG_SNAPSHOT = WORK.file("snapshot.json");
+	writeFileSync(process.env.DSH_PI_AI_CATALOG_SNAPSHOT, JSON.stringify({ fetchedAt: new Date().toISOString(), source: "scratch", providers: 0, count: 0, models: {} }));
+}
+if (options.refresh !== true) process.env.DSH_PI_AI_CATALOG_REFRESH = "0";
 const MATCH = /^(.*[\\/]node_modules)[\\/]@deepseek-ai[\\/]dsh-llm-pi-ai[\\/]lib[\\/]index\.js$/.exec(SOURCE);
 const NODE_MODULES = options.nodeModules === undefined ? (MATCH === null ? undefined : MATCH[1]) : resolve(options.nodeModules);
 if (NODE_MODULES === undefined || !existsSync(join(NODE_MODULES, "@earendil-works", "pi-ai"))) {
@@ -63,24 +94,22 @@ if (NODE_MODULES === undefined || !existsSync(join(NODE_MODULES, "@earendil-work
  */
 if (options.settings !== undefined) process.env.DSH_PI_AI_SETTINGS_FILE = resolve(options.settings.replace(/^~/, process.env.HOME ?? "~"));
 
-/** Throwaway mirror so the copy resolves the install's own dependencies. */
+/**
+ * Throwaway mirror so the copy resolves the install's own dependencies.
+ *
+ * The directory lives in the system temp area and carries this process's id: two
+ * concurrent runs used to share one path derived from the source name alone, and a
+ * crashed run used to leave it behind inside the checkout. The shared sandbox hook
+ * removes it on exit and on a signal.
+ * @param source - the adapter file to copy.
+ * @returns the path of the copied module.
+ */
 function mirrorFor(source) {
-	const digest = createHash("sha1").update(source).digest("hex").slice(0, 8);
-	const dir = join(HERE, "runtime", digest);
-	rmSync(dir, { recursive: true, force: true });
+	const dir = WORK.file("mirror");
 	mkdirSync(dir, { recursive: true });
 	symlinkSync(NODE_MODULES, join(dir, "node_modules"), "dir");
 	const target = join(dir, "adapter.mjs");
 	copyFileSync(source, target);
-	/* The mirror is a scratch copy of a vendor file: never leave it behind. */
-	process.on("exit", () => {
-		try {
-			rmSync(dir, { recursive: true, force: true });
-			rmdirSync(join(HERE, "runtime"));
-		} catch {
-			/* A leftover scratch directory is not worth failing a test over. */
-		}
-	});
 	return target;
 }
 
@@ -105,6 +134,10 @@ function loadProviders() {
 					{ id: "probe/DeepSeek-V4-Flash-Vision", name: "probe/DeepSeek-V4-Flash-Vision" },
 					/* a model only the models.dev fixture knows */
 					{ id: "probe/zephyr-9-pro", name: "probe/zephyr-9-pro" },
+					/* the same name from two snapshot providers, one of them the vendor */
+					{ id: "probe/kimi-k9-ultra", name: "probe/kimi-k9-ultra" },
+					/* a chat row and a non-chat row sharing one bare name */
+					{ id: "probe/nebula-5", name: "probe/nebula-5" },
 					/* an aggregator/catalog disagreement: the catalog must win */
 					{ id: "probe/longcat-2.0", name: "probe/longcat-2.0" },
 					/* a model nothing anywhere describes */
@@ -191,6 +224,14 @@ for (const [provider, profile] of Object.entries(providers.providers)) {
 			reasoning: info?.reasoning === undefined ? [] : info.reasoning.efforts.map((effort) => effort.id)
 		});
 	}
+}
+
+if (options.jsonOut !== undefined) {
+	/* A file, not stdout: the caller gets the rows without having to find where a
+	 * banner ended, and the human-readable report below stays readable. */
+	writeFileSync(resolve(options.jsonOut), JSON.stringify(rows));
+	console.log(`${String(rows.length)} rows -> ${resolve(options.jsonOut)}`);
+	process.exit(0);
 }
 
 if (options.json) {
