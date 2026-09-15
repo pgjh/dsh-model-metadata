@@ -242,6 +242,21 @@ const fusion = await evaluate(`(async () => {
 			};
 		})(),
 		overflowingControls: overflowing,
+		/* Exactly ONE caret per picker: the trigger draws DSH's chevron as a child, and
+		 * must not also inherit one as a background image from a copied class — that
+		 * combination is what showed two arrows until the select class stopped being
+		 * merged into the trigger. */
+		carets: (() => {
+			const trigger = first?.querySelector("button[aria-haspopup='menu']");
+			if (!(trigger instanceof Element)) return undefined;
+			const computed = getComputedStyle(trigger);
+			return {
+				chevronChildren: trigger.querySelectorAll("svg").length,
+				backgroundImage: computed.backgroundImage,
+				paddingRight: computed.paddingRight,
+				className: trigger.className
+			};
+		})(),
 		stillInCard: rowOf(card),
 		card: used,
 		/* The pickers must be DSH's own in-page Menu, never the platform's sheet. */

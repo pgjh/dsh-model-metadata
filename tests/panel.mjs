@@ -153,6 +153,20 @@ if (typeof registration?.factory === "function") {
 	expect("and finds nothing (rather than another route) when it is absent", client.routeIn(stalePayload, "deepseek-official"), undefined);
 	expect("an empty payload is not a crash", client.routeIn(undefined, "my-gateway"), undefined);
 
+	/*
+	 * Keeping the payload in step with the editor: a row the payload cannot answer
+	 * for must cause exactly one refetch, and no refetch is ever asked for while
+	 * every row is answerable — that is what made a newly added model render no
+	 * controls at all until the page was reloaded.
+	 */
+	const known = new Set(["probe/glm-5.3"]);
+	expect("a row the payload knows needs no refetch", client.reloadKeyFor(["probe/glm-5.3"], known, ""), "");
+	expect("an unknown row asks for one, keyed by the whole row set", client.reloadKeyFor(["probe/glm-5.3", "probe/added"], known, ""), "probe/added\u0000probe/glm-5.3");
+	expect("asking again for the same row set is not a loop", client.reloadKeyFor(["probe/added", "probe/glm-5.3"], known, "probe/added\u0000probe/glm-5.3"), "");
+	expect("a second added row asks once more", client.reloadKeyFor(["probe/added", "probe/second"], known, "probe/added"), "probe/added\u0000probe/second");
+	expect("an empty editor asks for nothing", client.reloadKeyFor([], known, ""), "");
+	expect("rows with an empty id are not rows yet", client.reloadKeyFor(["", ""], known, ""), "");
+
 	/* The fusion contract, held against the primitives the cells actually use: the
 	 * chain's verdict is reported, the capacity 容量 cannot show is spelled, and a
 	 * row is dirty only once it differs from what settings declares. */

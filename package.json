@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-metadata",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Capability metadata for hand-declared gateway models, resolved at runtime by bare model name (context window, output cap, reasoning levels, vision) — matched against the official DeepSeek route's catalog, the installed pi-ai catalog, opencode and models.dev, without writing to your settings.",
   "author": "mx_ (https://www.npmjs.com/~mx_)",
   "license": "MIT",
