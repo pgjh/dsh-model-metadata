@@ -5,7 +5,6 @@ node_modules/
 # throwaway setting document they lend to a probe route. Each removes its own on exit,
 # so this only matters for a run that was interrupted before it could.
 tests/.browser-profile*/
-tests/.live-refresh/
 tests/.newroute/
 
 # The audit this 0.2.0 round came from: a working record, kept out of the published

@@ -178,6 +178,16 @@ if (auto !== 0) {
 	expect("so exactly one more attempt was made", attempts, 2);
 	expect("a manual refresh ignores the floor — an operator asked", plugin.refreshIfDue(failing.logger, "manual", start + 6 * 60000 + 1), true);
 	await new Promise((resolve) => setTimeout(resolve, 60));
+	/*
+	 * The daily tick is the third documented trigger, and the only one that needs neither a
+	 * launch nor an open page — which is why the plugin schedules it: a process that stays
+	 * up for weeks used to keep its first snapshot for weeks. It follows the age rule, and
+	 * the attempt floor applies to it like every other automatic trigger, so a failing fetch
+	 * does not become an hourly download either.
+	 */
+	expect("a daily tick refreshes a copy that is due", plugin.refreshIfDue(failing.logger, "daily", start + 12 * 60000), true);
+	await new Promise((resolve) => setTimeout(resolve, 60));
+	expect("and the floor keeps a failing daily tick from retrying at its own rate", plugin.refreshIfDue(failing.logger, "daily", start + 12 * 60000 + 1000), false);
 
 	/*
 	 * A body-less 304 is the endpoint saying "your copy is current". It arrives as

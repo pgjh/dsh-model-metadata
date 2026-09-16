@@ -14,7 +14,7 @@
  * repeated against the real loader as a cross-check.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,11 +59,17 @@ const rowName = homePatchRow(pluginDst, ID).name;
  * Every child's HOME also points inside the work directory, so even a run that names no
  * `--home` can only ever reach a synthetic home: no test here can touch a real one, which
  * is what an audit run of the installer once did.
+ *
+ * The plugin's own switches are stripped, and not only DSH_HOME/DSH_UNIT: this installer
+ * resolves the snapshot through the same rule the plugin does, so an inherited
+ * `DSH_PI_AI_CATALOG_SNAPSHOT` (verify.mjs sets it to the repository's fixture for the
+ * whole process) reached `--purge` and made it delete a tracked file. Every switch a
+ * child could act on goes, and a test that wants one sets it explicitly.
  */
 const childEnv = { ...process.env, PATH: dirname(process.execPath), HOME: join(WORK, "user-home") };
-delete childEnv.DSH_UNIT;
-delete childEnv.DSH_HOME;
-delete childEnv.DSH_INSTALL;
+for (const name of Object.keys(childEnv)) {
+	if (name.startsWith("DSH_PI_AI_") || name.startsWith("DSH_CATALOG_") || name === "DSH_HOME" || name === "DSH_INSTALL" || name === "DSH_UNIT") delete childEnv[name];
+}
 
 /**
  * Run the installer once.
@@ -404,6 +410,49 @@ expect("--purge alone removed the snapshot", existsSync(snapshotDst), false);
 expect("--purge alone removed the row", occurrences(readPatch(), `id: ${ID}`), 0);
 expect("--purge alone did not re-install anything", purged.output.includes("copied plugin"), false);
 expect("--uninstall on a home with nothing installed exits 0", run(args(["--uninstall"])).status, 0);
+
+/* 16. The states a run can end in that are not "it worked": a skipped pre-flight, two
+ * instructions at once, a check that must not write, a write that is refused, and a purge
+ * whose target is a switch rather than a file name. Each one is a defect the first round
+ * shipped: an install that reported FAIL and exited 2 after copying everything, an
+ * `--apply --uninstall` that silently uninstalled, a `--check --vision` that wrote the
+ * unit drop-in and reloaded systemd, a purge that died with a raw EACCES stack, and one
+ * that deleted the default snapshot name while the plugin read another path. */
+const noLoader = run(["--apply", "--home", home, "--install", join(WORK, "no-dsh-here"), "--unit", UNIT, "--unit-dir", units]);
+expect("a skipped pre-flight is a note, not a failure", [noLoader.status, noLoader.output.includes("pre-flight: skipped"), noLoader.output.includes("FAIL pre-flight")], [0, true, false]);
+expect("and the install it skipped the check for really happened", existsSync(join(pluginDst, "index.mjs")), true);
+
+const both = run(["--apply", "--uninstall"], { probe: true });
+expect("two action flags are refused", both.status, 1);
+expect("and the refusal names both of them", [both.output.includes("--apply"), both.output.includes("--uninstall")], [true, true]);
+
+run(args(["--apply"]));
+rmSync(dropInFile, { force: true });
+const checkVision = run(args(["--check", "--vision", "off"]));
+expect("--check --vision exits 0", checkVision.status, 0);
+expect("--check --vision wrote no drop-in", existsSync(dropInFile), false);
+expect("and reported what it would have written", checkVision.output.includes("would write"), true);
+
+run(args(["--apply"]));
+chmodSync(join(home, "plugins"), 0o500);
+try {
+	const blocked = run(args(["--purge"]));
+	expect("a purge that cannot delete exits 2", blocked.status, 2);
+	expect("as a one-line failure naming the path, not a stack trace", [blocked.output.includes("cannot write"), blocked.output.includes("Error:"), /at rmSync/u.test(blocked.output)], [true, false, false]);
+} finally {
+	chmodSync(join(home, "plugins"), 0o700);
+	rmSync(pluginDst, { recursive: true, force: true });
+}
+
+run(args(["--apply"]));
+writeFileSync(snapshotDst, "{}\n");
+const elsewhere = join(WORK, "elsewhere-snapshot.json");
+writeFileSync(elsewhere, "{}\n");
+const redirected = run(args(["--purge"]), { env: { ...childEnv, DSH_PI_AI_CATALOG_SNAPSHOT: elsewhere } });
+expect("a purge with a redirected snapshot exits 0", redirected.status, 0);
+expect("it deleted the file the plugin actually reads", existsSync(elsewhere), false);
+expect("and left the default-named file alone", existsSync(snapshotDst), true);
+rmSync(snapshotDst, { force: true });
 
 /* 15. The real loader, when this machine has one: everything above proved the exit codes
  * with a stand-in, this proves the document really composes there. */

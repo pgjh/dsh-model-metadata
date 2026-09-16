@@ -194,7 +194,17 @@ export const reactShim = {
 	useEffect: () => {},
 	useCallback: (fn) => fn,
 	useMemo: (fn) => fn(),
-	memo: (component) => component,
+	/*
+	 * `React.memo`'s result carries the comparator, and a suite that could not see it
+	 * could not assert the one property the memo depends on: that a prop it compares by
+	 * reference keeps that reference across renders. Dropping it here is what let the
+	 * defeated memo live unnoticed.
+	 */
+	memo: (component, compare) => {
+		const memoized = (props) => component(props);
+		if (compare !== undefined) memoized.compare = compare;
+		return memoized;
+	},
 	Component: class Component {}
 };
 

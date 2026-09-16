@@ -29,14 +29,14 @@ import { sandbox } from "./tests/harness.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** Arguments that must be followed by a value. */
-const VALUED = ["--source", "--settings", "--provider", "--plugin", "--node-modules", "--json-out"];
+const VALUED = ["--source", "--settings", "--plugin-settings", "--provider", "--plugin", "--node-modules", "--json-out"];
 
 function parseArgs(argv) {
-	const options = { source: undefined, settings: undefined, provider: undefined, nodeModules: undefined, json: false, jsonOut: undefined, refresh: false };
+	const options = { source: undefined, settings: undefined, pluginSettings: undefined, provider: undefined, nodeModules: undefined, json: false, jsonOut: undefined, refresh: false };
 	for (let at = 0; at < argv.length; at++) {
 		const arg = argv[at];
 		if (arg === "--help") {
-			console.log("node test-fallback.mjs [--source <adapter.js>] [--settings <settings.yaml>] [--provider <route>] [--plugin <lib/index.mjs>] [--node-modules <dir>] [--json] [--json-out <file>] [--refresh]");
+			console.log("node test-fallback.mjs [--source <adapter.js>] [--settings <settings.yaml>] [--plugin-settings <settings.yaml>] [--provider <route>] [--plugin <lib/index.mjs>] [--node-modules <dir>] [--json] [--json-out <file>] [--refresh]");
 			process.exit(0);
 		}
 		if (arg === "--json") options.json = true;
@@ -51,6 +51,7 @@ function parseArgs(argv) {
 			}
 			if (arg === "--source") options.source = value;
 			else if (arg === "--settings") options.settings = value;
+			else if (arg === "--plugin-settings") options.pluginSettings = value;
 			else if (arg === "--provider") options.provider = value;
 			else if (arg === "--plugin") options.plugin = value;
 			else if (arg === "--node-modules") options.nodeModules = value;
@@ -93,6 +94,24 @@ if (NODE_MODULES === undefined || !existsSync(join(NODE_MODULES, "@earendil-work
  * judged against the live ~/.dsh/settings.yaml.
  */
 if (options.settings !== undefined) process.env.DSH_PI_AI_SETTINGS_FILE = resolve(options.settings.replace(/^~/, process.env.HOME ?? "~"));
+/*
+ * `--plugin-settings` is what makes the precedence rule testable from the outside: the
+ * adapter is fed one document while the plugin is told to read another, which is the only
+ * way to reproduce "the declarations exist and this plugin cannot see them". A run that
+ * passes it gets no scratch document of its own.
+ */
+if (options.pluginSettings !== undefined) process.env.DSH_PI_AI_SETTINGS_FILE = resolve(options.pluginSettings.replace(/^~/, process.env.HOME ?? "~"));
+else if (options.settings === undefined) {
+	/*
+	 * The plugin refuses to fill anything in when it cannot read the declarations it
+	 * is supposed to respect (that is its fail-closed rule), so a run with no
+	 * `--settings` gets a scratch empty document rather than the machine's
+	 * `settings.yaml`: the diagnostic must not depend on — or be silently disabled
+	 * by — whatever is configured here. Same reasoning as the scratch snapshot above.
+	 */
+	process.env.DSH_PI_AI_SETTINGS_FILE = WORK.file("plugin-settings.yaml");
+	writeFileSync(process.env.DSH_PI_AI_SETTINGS_FILE, "llm-pi-ai:\n  providers: {}\n");
+}
 
 /**
  * Throwaway mirror so the copy resolves the install's own dependencies.

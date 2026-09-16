@@ -42,9 +42,9 @@ llm-pi-ai:
 ## 插件做的事
 
 1. **按模型名查**：取 id 里最后一个 `/` 后面的名字（`my-gateway/gpt-4o` → `gpt-4o`），按"官方路由 → 内置目录 → opencode → models.dev"的顺序查（详见下面「哪些名字认得出」），查到之后，就把这个模型该有的上下文长度、输出上限、推理等级、图片支持补上去。名字的写法差一点也没关系：`deepseek-v41-flash`、`deepseek-v4.1-flash`、"DeepSeek-V41-Flash" 算同一个名字，显示名和 `-exp` 之类的后缀也能对上。
-2. **只补缺的**：你在 `settings.yaml` 里亲手写过的字段，它不动。
+2. **只补缺的**：你在 `settings.yaml` 里亲手写过的字段，它不动。反过来，**它读不到这份文档时也绝不猜**——文件不在它找的位置、机器上没有 YAML 解析器、或者你正编辑到一半 YAML 语法坏了，它都会**完全不补**，并在日志里说明原因（`enrichment off (…)`）：这时候"你有没有声明"是它看不见的事实，而"借用"会把你亲手钉住的 64K 覆盖成目录里的 272K。
 3. **界面上给你两个开关**：推理等级、视觉。DSH 官方界面没有这两个控件，这里是唯一的图形入口；改完点「写入」固定下来，不点就一直跟着目录走。写入是**按行**的：双击只写一次，也不会把别的行还没写入的改动丢掉；只读的部署会直接说明写不了。这两个控件和结论行跟随设置页的语言（简体中文 / English）。
-4. **目录数据自己更新**：启动、打开界面、每天各检查一次 models.dev，所以新模型不用你手动管；数据没变时只确认一次，不重新下载。
+4. **目录数据自己更新**：启动、打开界面、以及按天（每小时检查一次是否过期）各更新一次 models.dev，所以新模型不用你手动管；数据没变时只确认一次，不重新下载。
 
 ## 安装
 
@@ -97,8 +97,8 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 | 时机 | 说明 |
 |---|---|
 | 启动 dsh | 默认检查一次；本地数据不到 15 分钟就跳过（`DSH_PI_AI_CATALOG_REFRESH_ON_START=stale` 改成按天判断，`off` 则不在启动时检查） |
-| 打开 dsh 界面 | 数据超过 6 小时就后台更新（`DSH_PI_AI_CATALOG_REFRESH_OPEN_HOURS`，`0` = 不按这个时机更新） |
-| 每天 | 超过 24 小时算过期（`DSH_PI_AI_CATALOG_REFRESH`），`0` = 关掉所有自动更新 |
+| 打开 dsh 界面 | 数据超过 6 小时就后台更新（`DSH_PI_AI_CATALOG_REFRESH_OPEN_HOURS`，`0` = 不按这个时机更新）。这个时机是**界面数据路由**被请求时触发的，所以 `DSH_PI_AI_CATALOG_PANEL=off` 会让它一起消失（见下表） |
+| 按天（进程常驻时的那条路） | 插件每小时看一次本地数据的年龄，超过 24 小时（`DSH_PI_AI_CATALOG_REFRESH`）就后台更新；`0` = 关掉所有自动更新（总开关）。这条是给"一直不重启、也不打开设置页"的部署准备的：以前没有它，这种进程会一直用最初那份数据 |
 | 手动 | `node lib/refresh-snapshot.mjs`，立刻生效、不用重启（`--help` 列出 `--out` / `--url` / `--timeout-ms` / `--settings`；`--settings` 会顺带打印"你配的模型里这份数据覆盖到了哪些"） |
 
 一次检查不一定等于一次下载：请求会带上本地数据里存的 ETag，models.dev 回一个**没有内容的 304** 就说明数据没变——这时只把本地文件的时间戳重新盖一次，不重新下载。下载**失败**也不会被反复重试：自动触发的两次尝试之间至少隔 5 分钟，所以网络不通时反复打开界面不会变成一连串下载请求（手动跑 `refresh-snapshot.mjs` 不受这条限制）。
@@ -109,7 +109,7 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 
 | 变量 | 默认 | 取值 / 作用 |
 |---|---|---|
-| `DSH_PI_AI_CATALOG_FALLBACK` | `full` | `full` = 容量 + 推理等级 + 图片都补；`context` = 只补容量，推理那一半关掉（等价于把 `DSH_PI_AI_CATALOG_FALLBACK_LEVELS` 设成 `off`）；`off` = 插件完全不干活 |
+| `DSH_PI_AI_CATALOG_FALLBACK` | `full` | `full` = 容量 + 推理等级 + 图片都补；`context` = 容量和图片照补，推理那一半关掉（等价于把 `DSH_PI_AI_CATALOG_FALLBACK_LEVELS` 设成 `off`；图片要一起关就用 `DSH_PI_AI_CATALOG_FALLBACK_INPUT=off`）；`off` = 插件完全不干活 |
 | `DSH_PI_AI_CATALOG_FALLBACK_LEVELS` | `on` | `on` = 任何匹配到的来源都能声明推理等级；`bundled` = 只有 DSH 自带目录（pi-ai 目录、官方 DeepSeek 路由自己的目录）能，models.dev 只补容量；`off` = 完全不碰推理等级 |
 | `DSH_PI_AI_CATALOG_FALLBACK_INPUT` | `on` | `on` = 图片也走同一套匹配；`bundled` = 只信 DSH 自带目录（含官方 DeepSeek 路由自己的目录），不信 models.dev；`off` = 不判断图片 |
 | `DSH_PI_AI_CATALOG_REFRESH` | `24` | 过期小时数，超过就认为数据旧了；`0` = 关掉所有自动更新 |
@@ -118,14 +118,14 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 | `DSH_PI_AI_CATALOG_REFRESH_OPEN_HOURS` | `6` | 打开界面时，数据超过这个小时数才后台更新；`0` = 不按这个时机更新 |
 | `DSH_PI_AI_CATALOG_SNAPSHOT` | `$DSH_HOME/models-dev-snapshot.json` | 数据文件换位置（插件在磁盘上只写这一个文件） |
 | `DSH_PI_AI_CATALOG_SNAPSHOT_URL` | models.dev 的公开地址（默认数据源） | 换数据来源（自建镜像 / 代理用） |
-| `DSH_PI_AI_CATALOG_PANEL` | `on` | `off` = 根本不注册界面数据路由（补全本身不受影响，只是编辑器里不会出现那两行控件，也不会显示任何报错） |
+| `DSH_PI_AI_CATALOG_PANEL` | `on` | `off` = 根本不注册界面数据路由（补全本身不受影响，只是编辑器里不会出现那两行控件，也不会显示任何报错）。注意它同时会关掉「数据超过 6 小时、打开界面时更新」这个时机——那个时机就是这条路由被请求时触发的 |
 | `DSH_PI_AI_CATALOG_PANEL_HOSTS` | 不设 = 任何 Host | 逗号分隔的 Host 白名单：只回应列出来的 Host，不在其中的一律拒绝；反代后面用 |
 | `DSH_CATALOG_FALLBACK_NODE_MODULES` | 不设 | 额外的一个 `node_modules` 根目录：找不到 DSH 的包时从这里找 |
 | `DSH_PI_AI_SETTINGS_FILE` | `$DSH_HOME/settings.yaml` | 读哪个设置文档（判断哪些字段是你自己声明的） |
 
 `DSH_PI_AI_CATALOG_FALLBACK_LEVELS` 是为什么存在的：镜像站对某些模型只给一个"会推理"的裸标记、没有等级细节，把它当作"低/中/高都行"可能给端点送去它当场就拒绝的等级——和图片那个开关防的是同一类过度声明。设成 `bundled` 时，自带目录（它们本来就带等级映射）说了算，models.dev 只用来补容量。
 
-每个开关都做校验：**不设**就是上面的默认值；**写了但不认识**会在日志里报一次，然后落到该开关保守的那一端——`DSH_PI_AI_CATALOG_FALLBACK_INPUT` 认不出算 `off`、`DSH_PI_AI_CATALOG_FALLBACK_LEVELS` 认不出算 `bundled`、`DSH_PI_AI_CATALOG_REFRESH_ON_START` 认不出算 `off`、`DSH_PI_AI_CATALOG_FALLBACK` 认不出算 `full`（唯一例外是 `DSH_PI_AI_CATALOG_PANEL`：认不出按默认的 `on` 处理）。小时数只认普通的非负十进制数：`0x10` 这种写法会被拒绝并按默认值处理，不会悄悄读成 `0`（那等于关掉自动更新）。
+每个开关都做校验：**不设**就是上面的默认值；**写了但不认识**会在日志里报一次，然后落回一个写明的取值——大多数开关落到**保守**的那一端：`DSH_PI_AI_CATALOG_FALLBACK_INPUT` 认不出算 `off`、`DSH_PI_AI_CATALOG_FALLBACK_LEVELS` 认不出算 `bundled`、`DSH_PI_AI_CATALOG_REFRESH_ON_START` 认不出算 `off`；两个例外是**故意**落到宽松端（那正是它们的默认值，认不出时宁可维持原行为）：`DSH_PI_AI_CATALOG_FALLBACK` 认不出算 `full`、`DSH_PI_AI_CATALOG_PANEL` 认不出算 `on`。小时数只认普通的非负十进制数：`0x10` 这种写法会被拒绝并按默认值处理，不会悄悄读成 `0`（那等于关掉自动更新）。
 
 ### 更新插件
 
@@ -173,11 +173,13 @@ node install-plugin.mjs --purge                        # 卸载，并把拷进�
 
 用 `--vision` 写过的 systemd drop-in，`--uninstall` 和 `--purge` 会一起删掉。
 
+复制安装器还有几个选项（`node install-plugin.mjs --help` 是完整列表）：`--check` 只报告当前状态并跑一次挂载自检（**不写任何文件**，`--vision` 也一样），`--apply` / `--update` 都是"重新拷一份并补上插件行"，`--profile <名>` 只改某个 profile 的补丁文件，`--home <目录>` / `--install <目录>` 指定 DSH home 与 DSH 安装位置，`--unit <名>` + `--unit-dir <目录>` 指出 systemd 的 drop-in 目录，`--vision on|bundled|off` 就是给这个单元写 `DSH_PI_AI_CATALOG_FALLBACK_INPUT` 的 override（`on` 是删掉 override、回到插件默认）。另外 `--purge` 删的是**插件真正读的那个**快照文件：你设过 `DSH_PI_AI_CATALOG_SNAPSHOT` 就删那个路径，而不是默认名字那个。
+
 ## 注意
 
 - 插件挂在 DSH 内部一个没有公开文档的位置（`PiAiAdapter`）。DSH 升级若改动它，插件会自动停用并打一行日志，不会让 DSH 起不来。
 - 界面读数据用的 `GET /model-metadata/matrix` 不走应用的登录校验（DSH 目前没给插件路由留校验钩子）。它只回答模型名和目录结论，不含地址、也不含任何密钥——但另一面要说清楚：**端口对别人可达的部署，别人也能读到"你配置了哪些模型"**。
-- 不想要这条路由就用开关关掉：`DSH_PI_AI_CATALOG_PANEL=off`。补全本身完全不受影响，编辑器里只是**不会出现那两行控件**（也不会显示任何报错——客户端分不清"开关关了"还是"路由没注册过"，所以它什么都不说）。只想在特定的名字上回应（比如在反代后面）就用 `DSH_PI_AI_CATALOG_PANEL_HOSTS` 给出允许的 Host 列表，不在列表里的 Host 一律拒绝；来自别的站点的浏览器跨站请求也一律拒绝。真要连注册这段代码都去掉，最后的手段才是删掉 `lib/index.mjs` 里的 `registerPanel(ctx, logger)` 一行——那是改源码、插件更新后会回来，能不改就不改。
+- 不想要这条路由就用开关关掉：`DSH_PI_AI_CATALOG_PANEL=off`。补全本身完全不受影响，编辑器里只是**不会出现那两行控件**（也不会显示任何报错——客户端分不清"开关关了"还是"路由没注册过"，所以它什么都不说）。只想在特定的名字上回应（比如在反代后面）就用 `DSH_PI_AI_CATALOG_PANEL_HOSTS` 给出允许的 Host 列表，不在列表里的 Host 一律拒绝；来自别的站点的浏览器跨站请求也一律拒绝。真要连注册这段代码都去掉，最后的手段才是删掉 `lib/index.mjs` 里的 `registerPanel(ctx, logger)` 一行——那是改源码、插件更新后会回来，能不改就不改；而且它不只去掉那条路由，还会一起失去"打开界面时更新数据"这个时机（`registerPanel` 是那个时机的唯一入口，另一个入口是每小时检查一次的按天规则，不受影响）。
 
 ## 开发
 
@@ -214,12 +216,14 @@ node test-fallback.mjs --source <…/@deepseek-ai/dsh-llm-pi-ai/lib/index.js> \
                        --plugin ./lib/index.mjs --settings <settings.yaml>
 ```
 
-`--source` 不写会去自动找已安装的适配器（找不到就让它报错，用下面的 `DSH_INSTALL` 指路）；`--plugin` 加上就会带上本插件，用来对比"有插件 / 没插件"同一个模型的两行结果。真浏览器工具同理，需要时用环境变量指路（不写死任何绝对路径）：
+`--source` 不写会去自动找已安装的适配器（找不到就让它报错，用下面的 `DSH_INSTALL` 指路）；`--plugin` 加上就会带上本插件，用来对比"有插件 / 没插件"同一个模型的两行结果。不写 `--settings` 时它会自带一份空文档（既不读、也不会被机器上的 `settings.yaml` 影响）；`--plugin-settings <settings.yaml>` 让适配器和插件读**不同**的文档，用来复现"声明存在、插件读不到"这一类情况（这时代码会拒绝补任何字段，见「插件做的事」第 2 条）。真浏览器工具同理，需要时用环境变量指路（不写死任何绝对路径）：
 
 ```sh
 DSH_INSTALL=<dsh 包目录或含 node_modules 的 lib 目录>   # 找不到 DSH 时
 CHROME=<chromium 可执行文件>                            # 找不到浏览器时（默认扫 Playwright 缓存与 PATH）
+PLAYWRIGHT_CHROME=<chromium 可执行文件>                 # 同上，兼容 Playwright 自己的变量名
 DSH_UNIT=<你的 systemd 单元名>                          # 浏览器工具要从 journal 里取应用 URL 时（或用 --url 直接给）
+LIVE_REFRESH_DEADLINE_MS=<毫秒>                         # tests/live-refresh.mjs 等真下载完成的上限（默认 300000）
 ```
 
 ```
@@ -232,21 +236,26 @@ lib/refresh-snapshot.mjs 手动更新目录的 CLI
 cordis.patch.yml         安装时自动挂载插件的那一行
 install-plugin.mjs       不用 pnpm 的本地安装 / 更新 / 卸载
 packaging.mjs            包布局与本地布局的约定（安装器和测试共用）
-dev-paths.mjs            开发工具找 DSH 与浏览器的唯一出处（无硬编码路径；浏览器那部分要真的 DSH 安装和 Chromium）
+dev-paths.mjs            开发工具找 DSH 与浏览器的唯一出处（不含机器相关的绝对路径；浏览器那部分要真的 DSH 安装和 Chromium）
 tests/harness.mjs        各套件共用的脚手架
 tests/unit.mjs           三个纯模块的套件
 tests/install-plugin.mjs 复制安装器的套件
 tests/cdp.mjs            三个浏览器工具共用的 CDP 驱动
 tests/snapshot-fixture.json  回归测试用的两条目录数据（让结果与当天数据无关）
 CHANGELOG.md             每个版本改了什么
-OPTIMIZATION-AUDIT.md    本轮审计的结论与判断依据（已实现，保留作背景）
 ```
 
 npm 包里发的是 `lib/index.mjs`、`lib/names.mjs`、`lib/panel.mjs`、`lib/snapshot.mjs`、`lib/refresh-snapshot.mjs`、`lib/client.js`、`cordis.patch.yml`、`install-plugin.mjs`、`packaging.mjs`、`dev-paths.mjs`、`README.md`、`CHANGELOG.md`、`LICENSE` 和 `package.json`——所以"复制文件"装法在 npm 装好的副本里也能用。`verify.mjs`、`test-fallback.mjs` 和 `tests/` 是开发工具，**不在**包里，只有源码检出里有。
 
 ## 问题与贡献
 
-遇到问题、想让某个名字被认出来、或想改点别的，直接开 issue：<https://github.com/pgjh/dsh-model-metadata/issues>——带上 DSH 版本、插件启动那行日志（`<插件目录>/index.mjs` 被装载的那行），**别贴 `baseURL`、API key 或任何 credentials**：其中不带这些信息的是模型名和目录来源，够定位了。
+遇到问题、想让某个名字被认出来、或想改点别的，直接开 issue：<https://github.com/pgjh/dsh-model-metadata/issues>——带上 DSH 版本和插件启动那行日志，形如：
+
+```
+dsh-model-metadata: installed (mode full+levels:on+input:on, refresh 24h + on start always (floor 15m) + on open 6h + daily check 1h, panel on, adapter <…>/dsh-llm-pi-ai/lib/index.js, catalog <…>/pi-ai/dist/providers/all.js, model names indexed 2604, official deepseek catalog 4 models, snapshot entries 3698)
+```
+
+（这行里有用的就是括号里那几段开关状态和三个数字；它不含地址也不含密钥。）另外**别贴 `baseURL`、API key 或任何 credentials**：真正需要的是模型名和目录来源，够定位了。
 
 ## 许可
 

@@ -22,7 +22,7 @@
  *
  * The page is driven through the shared CDP helper (`tests/cdp.mjs`).
  */
-import { copyFileSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appUrl, flag, openPage, option, sleep } from "./cdp.mjs";
@@ -37,7 +37,18 @@ const url = appUrl();
 let card = option("--card", "");
 const keep = flag("--keep");
 
-/* Back up first: nothing below may leave the user's settings changed. */
+/*
+ * Back up first: nothing below may leave the user's settings changed.
+ *
+ * A backup that is *already* there means a previous run was killed before it could
+ * restore (SIGKILL and power loss run no handler at all): that file is the only copy of
+ * the user's own document, so it goes back before this run reads or writes anything.
+ */
+if (existsSync(BACKUP)) {
+	copyFileSync(BACKUP, SETTINGS);
+	rmSync(BACKUP, { force: true });
+	console.log(`recovered ${SETTINGS} from the backup a killed run left behind`);
+}
 const original = readFileSync(SETTINGS);
 copyFileSync(SETTINGS, BACKUP);
 let restored = false;
@@ -59,6 +70,18 @@ process.on("exit", restore);
 process.on("SIGINT", () => {
 	restore();
 	process.exit(130);
+});
+process.on("SIGTERM", () => {
+	restore();
+	process.exit(143);
+});
+/* An uncaught throw would otherwise print a stack and exit without restoring: the tool
+ * writes into the user's own settings document, so every path that leaves the process
+ * goes through `restore()` except a hard kill, which the recovery above covers. */
+process.on("uncaughtException", (error) => {
+	restore();
+	console.error(error);
+	process.exit(1);
 });
 
 const session = await openPage(url, {

@@ -12,7 +12,7 @@
  * context window, output cap and reasoning levels without touching route-owned
  * fields or overriding explicit settings.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,8 +36,55 @@ if (!existsSync(ADAPTER)) {
  * Pin the models.dev tier to a two-entry fixture rather than to whatever snapshot
  * happens to be installed in $DSH_HOME: the suite then says the same thing on any
  * machine and on any day, and the repository carries no large regenerated data file.
+ *
+ * Missing means stop, not "judge against the machine": a conditional pin was how this
+ * suite would silently turn into a data- and date-dependent one (every models.dev
+ * assertion would read whatever the operator had fetched) with nothing to say so.
  */
-if (existsSync(SNAPSHOT)) process.env.DSH_PI_AI_CATALOG_SNAPSHOT = SNAPSHOT;
+if (!existsSync(SNAPSHOT)) {
+	console.error(`no ${SNAPSHOT}: the models.dev tier is pinned to that two-entry fixture on purpose, and a missing fixture must not fall back to the machine's snapshot. Restore it from git (tests/snapshot-fixture.json).`);
+	process.exit(2);
+}
+process.env.DSH_PI_AI_CATALOG_SNAPSHOT = SNAPSHOT;
+
+/**
+ * The switches a child scenario must not inherit from the operator's shell.
+ *
+ * This plugin is the kind of thing one exports while working on it, and a scenario
+ * that inherits a switch does not test what it says it tests: with
+ * `DSH_PI_AI_CATALOG_FALLBACK=off` in the environment the "the plugin fills a value
+ * in" scenario failed in a way that named the plugin rather than the environment,
+ * and with `DSH_PI_AI_CATALOG_PANEL=off` the panel suite registered no route at
+ * all. Each scenario re-applies the values it means to exercise.
+ */
+const SCENARIO_STRIPPED = [
+	"DSH_PI_AI_CATALOG_FALLBACK",
+	"DSH_PI_AI_CATALOG_FALLBACK_LEVELS",
+	"DSH_PI_AI_CATALOG_FALLBACK_INPUT",
+	"DSH_PI_AI_CATALOG_REFRESH",
+	"DSH_PI_AI_CATALOG_REFRESH_ON_START",
+	"DSH_PI_AI_CATALOG_REFRESH_START_FLOOR_MINUTES",
+	"DSH_PI_AI_CATALOG_REFRESH_OPEN_HOURS",
+	"DSH_PI_AI_CATALOG_SNAPSHOT",
+	"DSH_PI_AI_CATALOG_SNAPSHOT_URL",
+	"DSH_PI_AI_CATALOG_PANEL",
+	"DSH_PI_AI_CATALOG_PANEL_HOSTS",
+	"DSH_PI_AI_SETTINGS_FILE",
+	"DSH_CATALOG_FALLBACK_NODE_MODULES"
+];
+
+/**
+ * The environment one scenario runs in: this process's, minus the switches above,
+ * with the refresh policy off and the fixture pin re-applied — then whatever the
+ * scenario sets on top.
+ * @param extra - the scenario's own values.
+ * @returns the child's environment.
+ */
+function scenarioEnv(extra = {}) {
+	const env = { ...process.env };
+	for (const name of SCENARIO_STRIPPED) delete env[name];
+	return { ...env, DSH_PI_AI_CATALOG_REFRESH: "0", DSH_PI_AI_CATALOG_SNAPSHOT: SNAPSHOT, ...extra };
+}
 
 /**
  * Run one scenario through test-fallback.mjs. The refresh policy is disabled for
@@ -54,7 +101,7 @@ function runRaw(args, env = {}) {
 	const dir = mkdtempSync(join(tmpdir(), `dsh-mm-verify-${String(process.pid)}-`));
 	const out = join(dir, "rows.json");
 	try {
-		const result = spawnSync(process.execPath, [join(HERE, "test-fallback.mjs"), "--json-out", out, ...args], { encoding: "utf8", env: { ...process.env, DSH_PI_AI_CATALOG_REFRESH: "0", ...env } });
+		const result = spawnSync(process.execPath, [join(HERE, "test-fallback.mjs"), "--json-out", out, ...args], { encoding: "utf8", env: scenarioEnv(env) });
 		const rows = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : undefined;
 		return { ...result, rows };
 	} finally {
@@ -92,6 +139,63 @@ const rowOf = (rows, id) => {
 };
 
 /*
+ * The numbers several scenarios expect come from catalogs that ship inside the installed
+ * DSH package, and pinning them as literals made a DSH release fail this suite with no
+ * change in this repository — the assertion below would read "272000" while the catalog
+ * had moved on. So the expected values are read from the same catalogs the plugin reads,
+ * which is also what the assertion should say: *this name takes that route's numbers*. A
+ * name the catalog no longer carries stops the run with a message naming it, rather than
+ * silently testing nothing.
+ *
+ * The two-entry fixture's own numbers (zephyr, kimi-k9, nebula) stay literal: those are
+ * ours, in tests/snapshot-fixture.json.
+ */
+const catalog = await import(pathToFileURL(join(NODE_MODULES, "@earendil-works/pi-ai", "dist", "providers", "all.js")).href);
+const CATALOG_ROWS = new Map();
+for (const route of catalog.getBuiltinProviders()) {
+	for (const model of catalog.getBuiltinModels(route) ?? []) CATALOG_ROWS.set(`${route}\u0000${model.id}`, model);
+}
+
+/** One route's own row for one model id, or a stop when the catalog moved. */
+function catalogRow(route, id) {
+	const row = CATALOG_ROWS.get(`${route}\u0000${id}`);
+	if (row === undefined) {
+		console.error(`the installed catalog no longer carries ${route}/${id}; this suite's scenario for that name needs a new one`);
+		process.exit(2);
+	}
+	return row;
+}
+
+/** The official DeepSeek route's own list, resolved the way that route resolves it. */
+const OFFICIAL = await import(pathToFileURL(join(NODE_MODULES, "@deepseek-ai", "dsh-llm-deepseek", "lib", "index.js")).href);
+const OFFICIAL_MODELS = OFFICIAL.resolveAdapterOptions({}).models;
+/** The official route's row for one of its own ids, or a stop. */
+function officialRow(id) {
+	const row = OFFICIAL_MODELS.find((model) => model.id === id);
+	if (row === undefined) {
+		console.error(`the official DeepSeek route no longer lists ${id}; this suite's scenario for it needs a new one`);
+		process.exit(2);
+	}
+	return row;
+}
+
+/** The levels pi-ai knows, for the assertions that care about the shape, not the rule. */
+const KNOWN_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** The modalities that travel through the seam; a catalog may list others. */
+const KNOWN_MODALITIES = ["text", "image"];
+
+/** A catalog row's own modalities, reduced to the two that travel through the seam. */
+function catalogInput(route, id) {
+	return (catalogRow(route, id).input ?? []).filter((modality) => KNOWN_MODALITIES.includes(modality));
+}
+
+/** The official route's own modalities for one of its ids, likewise reduced. */
+function officialInput(id) {
+	return (officialRow(id).inputModalities ?? []).filter((modality) => KNOWN_MODALITIES.includes(modality));
+}
+
+/*
  * Scenario 1 runs the installed adapter WITHOUT the plugin: it must still report
  * the route defaults, which is both the reported problem and the proof that the
  * vendor file is untouched. (If a source patch were ever applied to it, this
@@ -104,28 +208,40 @@ expect("baseline: no reasoning levels offered", rowOf(baseline, "probe/glm-5.3")
 /* Scenario 2: the plugin against the untouched install. */
 const plugin = run(["--source", ADAPTER, "--plugin", PLUGIN]);
 const glm = rowOf(plugin, "probe/glm-5.3");
-expect("plugin: glm-5.3 matches zai, context window filled in", glm.contextWindow, 1000000);
-expect("plugin: glm-5.3 matches zai, output cap filled in", glm.maxTokens, 131072);
-expect("plugin: glm-5.3 matches zai, reasoning levels filled in", glm.reasoning, ["low", "high", "max"]);
-expect("plugin: upstream wins for gpt-5.4 (openai, not azure)", rowOf(plugin, "probe/gpt-5.4").contextWindow, 272000);
-expect("plugin: the vendor's own catalog answers by display name (minimax-m3)", [rowOf(plugin, "probe/minimax-m3").contextWindow, rowOf(plugin, "probe/minimax-m3").maxTokens], [1048576, 512000]);
+const ZAI_GLM = catalogRow("zai", "glm-5.3");
+expect("plugin: glm-5.3 takes zai's own context window", glm.contextWindow, ZAI_GLM.contextWindow);
+expect("plugin: and zai's own output cap", glm.maxTokens, ZAI_GLM.maxTokens);
+/* The exact level list is pi-ai's own rule (it reads the row's thinkingLevelMap), so what
+ * this asserts is the shape: real levels, from the known set, and a reasoning model's
+ * middle level among them. */
+expect("plugin: glm-5.3 offers real reasoning levels", [glm.reasoning.length > 0, glm.reasoning.every((level) => KNOWN_LEVELS.includes(level)), glm.reasoning.includes("high")], [true, true, true]);
+expect("plugin: upstream wins for gpt-5.4 (openai, not azure)", rowOf(plugin, "probe/gpt-5.4").contextWindow, catalogRow("openai", "gpt-5.4").contextWindow);
+expect("plugin: the vendor's own catalog answers by display name (minimax-m3)", [rowOf(plugin, "probe/minimax-m3").contextWindow, rowOf(plugin, "probe/minimax-m3").maxTokens], [catalogRow("minimax", "MiniMax-M3").contextWindow, catalogRow("minimax", "MiniMax-M3").maxTokens]);
+/*
+ * `probe/minimax-m3` is also published by the openrouter aggregator (`minimax/minimax-m3`,
+ * a different window), so this pins which route answered, not only that something did.
+ */
+expect("plugin: and it is the vendor's row, not the aggregator's", rowOf(plugin, "probe/minimax-m3").contextWindow === catalogRow("openrouter", "minimax/minimax-m3").contextWindow, false);
 /*
  * The official deepseek-official route keeps its catalog in its own package, so
  * the chain must consult it explicitly: the V41 flash's three spellings — the
  * route's display name "DeepSeek-V41-Flash", the models.dev id
  * deepseek-v4.1-flash, and the undotted alias — all name one model.
  */
-expect("plugin: the official deepseek catalog answers the v41 alias", rowOf(plugin, "probe/deepseek-v41-flash").contextWindow, 1000000);
+const OFFICIAL_FLASH = officialRow("deepseek-flash");
+expect("plugin: the official deepseek catalog answers the v41 alias", rowOf(plugin, "probe/deepseek-v41-flash").contextWindow, OFFICIAL_FLASH.contextWindow);
 expect("plugin: the alias gets the official route's own effort levels", rowOf(plugin, "probe/deepseek-v41-flash").reasoning, ["off", "low", "high", "max"]);
-expect("plugin: the dotted v4.1 spelling matches the same model", rowOf(plugin, "probe/deepseek-v4.1-flash").contextWindow, 1000000);
+expect("plugin: the dotted v4.1 spelling matches the same model", rowOf(plugin, "probe/deepseek-v4.1-flash").contextWindow, OFFICIAL_FLASH.contextWindow);
 expect("plugin: a name missing the catalog's -exp suffix still matches", rowOf(plugin, "probe/DeepSeek-V4-Flash-Vision").input, ["text", "image"]);
 expect("plugin: the models.dev tier covers a model no bundled catalog has", rowOf(plugin, "probe/zephyr-9-pro").contextWindow, 900000);
 /*
  * Aggregators mirror other people's catalogs, so a catalog route that carries
- * the same name must outrank them (opencode-go says 1000000 for longcat-2.0,
- * openrouter's own entry says 1048756 and wins).
+ * the same name must outrank them: openrouter's own row wins over opencode-go's
+ * for longcat-2.0, and both numbers are read from those catalogs rather than
+ * pinned here (the assertion is about which route answered, not about its size).
  */
-expect("plugin: a catalog route outranks the aggregator for the same name", rowOf(plugin, "probe/longcat-2.0").contextWindow, 1048756);
+expect("plugin: a catalog route outranks the aggregator for the same name", rowOf(plugin, "probe/longcat-2.0").contextWindow, catalogRow("openrouter", "meituan/longcat-2.0").contextWindow);
+expect("plugin: and it is not the aggregator's row that answered", catalogRow("openrouter", "meituan/longcat-2.0").contextWindow === catalogRow("opencode-go", "longcat-2.0").contextWindow, false);
 expect("plugin: a model nothing describes keeps the route default", rowOf(plugin, "probe/unknown-model-x").contextWindow, 262144);
 expect("plugin: a model nothing describes offers no levels", rowOf(plugin, "probe/unknown-model-x").reasoning, []);
 /*
@@ -133,7 +249,7 @@ expect("plugin: a model nothing describes offers no levels", rowOf(plugin, "prob
  * the aggregator stays that family's upstream: a bare `hy4-preview` must not
  * fall to the same-named entries other catalogs hold.
  */
-expect("plugin: the hy family keeps its aggregator upstream", rowOf(plugin, "probe/hy4-preview").contextWindow, 1024000);
+expect("plugin: the hy family keeps its aggregator upstream", rowOf(plugin, "probe/hy4-preview").contextWindow, catalogRow("opencode-go", "hy4-preview").contextWindow);
 expect("plugin: the route's own api is kept", glm.api, "openai-responses");
 expect("plugin: the route's own baseUrl is kept", glm.baseUrl, "http://127.0.0.1:1/v1");
 expect("plugin: catalog cost is not copied in", glm.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
@@ -145,27 +261,59 @@ expect("declared: explicit contextWindow survives", rowOf(declared, "probe/gpt-5
 expect("declared: explicit maxTokens survives", rowOf(declared, "probe/gpt-5.4").maxTokens, 8000);
 expect("declared: reasoningEfforts: false is respected", rowOf(declared, "probe/gpt-5.4").reasoning, []);
 expect("declared: an explicit level subset is respected", rowOf(declared, "probe/kimi-k3").reasoning, ["low", "high"]);
-expect("declared: the rest of that model is still filled in", rowOf(declared, "probe/kimi-k3").contextWindow, 1048576);
+expect("declared: the rest of that model is still filled in", rowOf(declared, "probe/kimi-k3").contextWindow, catalogRow("moonshotai", "kimi-k3").contextWindow);
 /* A declaration this plugin's own UI writes: the chain knows the name as
  * image-capable, and the row must keep saying text-only. */
 expect("declared: an explicit input list survives the chain", rowOf(declared, "probe/glm-5v-turbo").input, ["text"]);
+
+/*
+ * Scenario 3b: the precedence rule's one dangerous hole. When the plugin cannot read the
+ * declarations, it must refuse to borrow rather than borrow over a field it cannot see —
+ * before this rule, a declared `contextWindow: 64000` came back as the catalog's 272000 and
+ * `reasoningEfforts: false` as reason-capable, silently, on a config that was merely
+ * mid-edit or on an install whose YAML parser could not be loaded.
+ *
+ * `--plugin-settings` is what makes the case reachable: the adapter is fed one document,
+ * the plugin is pointed at another.
+ */
+const brokenDir = mkdtempSync(join(tmpdir(), "dsh-mm-broken-"));
+try {
+	const broken = join(brokenDir, "settings.yaml");
+	writeFileSync(broken, "llm-pi-ai:\n  providers:\n   - [unclosed\n");
+	const midEdit = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", PRECEDENCE, "--plugin-settings", broken]);
+	expect("an unreadable settings document is reported", [midEdit.status, midEdit.stderr.includes("cannot read")], [0, true]);
+	expect("and the declarations it could not read are left alone", [rowOf(midEdit.rows, "probe/gpt-5.4").contextWindow, rowOf(midEdit.rows, "probe/gpt-5.4").maxTokens, rowOf(midEdit.rows, "probe/gpt-5.4").reasoning], [64000, 8000, []]);
+	const notThere = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", PRECEDENCE, "--plugin-settings", join(brokenDir, "no-such-document.yaml")]);
+	expect("a document that is not where the plugin looks is refused too, not guessed at", [notThere.status, rowOf(notThere.rows, "probe/gpt-5.4").contextWindow, rowOf(notThere.rows, "probe/gpt-5.4").reasoning], [0, 64000, []]);
+	/*
+	 * And the rule must not become "never fill anything in": with a readable document that
+	 * declares nothing for this row, the chain still fills it.
+	 */
+	const empty = join(brokenDir, "empty-settings.yaml");
+	writeFileSync(empty, "llm-pi-ai:\n  providers: {}\n");
+	const readable = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", PRECEDENCE, "--plugin-settings", empty]);
+	expect("a readable document that declares nothing lets the chain fill the row", rowOf(readable.rows, "probe/glm-5.3").contextWindow, catalogRow("zai", "glm-5.3").contextWindow);
+} finally {
+	rmSync(brokenDir, { recursive: true, force: true });
+}
 
 /*
  * Scenario 4: input modalities ride the same chain by default, with narrower
  * settings available, because claiming image support an endpoint lacks fails a
  * turn instead of refusing the attachment.
  */
-expect("input: the chain decides images by default", rowOf(plugin, "probe/glm-5v-turbo").input, ["text", "image"]);
-expect("input: a text-only upstream keeps the model text-only", rowOf(plugin, "probe/glm-5.3").input, ["text"]);
-expect("input: the official route's own vision model declares image", rowOf(plugin, "probe/deepseek-v41-flash").input, ["text", "image"]);
+expect("input: the chain decides images by default", rowOf(plugin, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("input: and that catalog row is not text-only, or this scenario would prove nothing", catalogInput("zai-coding-cn", "glm-5v-turbo").includes("image"), true);
+expect("input: a text-only upstream keeps the model text-only", rowOf(plugin, "probe/glm-5.3").input, catalogInput("zai", "glm-5.3"));
+expect("input: the official route's own vision model declares image", rowOf(plugin, "probe/deepseek-v41-flash").input, officialInput("deepseek-flash"));
 const noInput = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "off" });
 expect("input=off: no modality is filled in", rowOf(noInput, "probe/glm-5v-turbo").input, ["text"]);
 const withInput = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "on" });
-expect("input=on: a vision model declares image", rowOf(withInput, "probe/glm-5v-turbo").input, ["text", "image"]);
+expect("input=on: a vision model declares image", rowOf(withInput, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
 expect("input=on: a models.dev-only claim is honoured too", rowOf(withInput, "probe/zephyr-9-pro").input, ["text", "image"]);
 const bundledOnly = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "bundled" });
-expect("input=bundled: the shipped catalog's claim still applies", rowOf(bundledOnly, "probe/glm-5v-turbo").input, ["text", "image"]);
-expect("input=bundled: the official deepseek catalog counts as shipped", rowOf(bundledOnly, "probe/deepseek-v41-flash").input, ["text", "image"]);
+expect("input=bundled: the shipped catalog's claim still applies", rowOf(bundledOnly, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("input=bundled: the official deepseek catalog counts as shipped", rowOf(bundledOnly, "probe/deepseek-v41-flash").input, officialInput("deepseek-flash"));
 expect("input=bundled: a models.dev-only claim is ignored", rowOf(bundledOnly, "probe/zephyr-9-pro").input, ["text"]);
 
 /*
@@ -188,8 +336,15 @@ const disabled = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATA
 expect("fallback=off: the route default is left alone", rowOf(disabled, "probe/glm-5.3").contextWindow, 262144);
 expect("fallback=off: and no levels are offered", rowOf(disabled, "probe/glm-5.3").reasoning, []);
 const contextOnly = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK: "context" });
-expect("fallback=context: capacities are still filled in", rowOf(contextOnly, "probe/glm-5.3").contextWindow, 1000000);
+expect("fallback=context: capacities are still filled in", rowOf(contextOnly, "probe/glm-5.3").contextWindow, catalogRow("zai", "glm-5.3").contextWindow);
+/*
+ * `context` means "capacities, not reasoning" — and, worth pinning because the README
+ * used to say "capacities only": image support still rides the chain in this mode, which
+ * is the same over-declaration the LEVELS/INPUT switches exist to bound, so a reader must
+ * be able to see which half is off here.
+ */
 expect("fallback=context: and reasoning is left to the seam", rowOf(contextOnly, "probe/glm-5.3").reasoning, []);
+expect("fallback=context: while image support still rides the chain", rowOf(contextOnly, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
 /*
  * Reasoning levels are chosen the same way input modalities are, and for the same
  * reason: a bare `reasoning: true` from a mirror becomes five offered levels, which
@@ -200,19 +355,19 @@ expect("fallback=context: and reasoning is left to the seam", rowOf(contextOnly,
 expect("levels: the default lets the whole chain declare reasoning", rowOf(plugin, "probe/zephyr-9-pro").reasoning.length > 0, true);
 const bundledLevels = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_LEVELS: "bundled" });
 expect("levels=bundled: a models.dev-only model fills capacity without claiming levels", [rowOf(bundledLevels, "probe/zephyr-9-pro").contextWindow, rowOf(bundledLevels, "probe/zephyr-9-pro").reasoning], [900000, []]);
-expect("levels=bundled: a shipped catalog still declares its own levels", rowOf(bundledLevels, "probe/kimi-k3").reasoning, ["low", "high", "max"]);
+expect("levels=bundled: a shipped catalog still declares its own levels", [rowOf(bundledLevels, "probe/kimi-k3").reasoning.length > 0, rowOf(bundledLevels, "probe/kimi-k3").reasoning.includes("high")], [true, true]);
 const noLevels = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_LEVELS: "off" });
-expect("levels=off: nothing claims reasoning, capacities still filled in", [rowOf(noLevels, "probe/kimi-k3").reasoning, rowOf(noLevels, "probe/kimi-k3").contextWindow], [[], 1048576]);
+expect("levels=off: nothing claims reasoning, capacities still filled in", [rowOf(noLevels, "probe/kimi-k3").reasoning, rowOf(noLevels, "probe/kimi-k3").contextWindow], [[], catalogRow("moonshotai", "kimi-k3").contextWindow]);
 const nonsenseLevels = runRaw(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_LEVELS: "yes please" });
 expect("an unrecognized levels value is reported and resolves to the conservative one", [
 	nonsenseLevels.stderr.includes("DSH_PI_AI_CATALOG_FALLBACK_LEVELS"),
 	nonsenseLevels.rows.find((row) => row.id === "probe/zephyr-9-pro").reasoning,
-	nonsenseLevels.rows.find((row) => row.id === "probe/kimi-k3").reasoning
-], [true, [], ["low", "high", "max"]]);
+	nonsenseLevels.rows.find((row) => row.id === "probe/kimi-k3").reasoning.length > 0
+], [true, [], true]);
 
 const unknownMode = runRaw(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK: "ofl" });
 expect("an unrecognized fallback value is reported, not silently obeyed", unknownMode.stderr.includes("DSH_PI_AI_CATALOG_FALLBACK"), true);
-expect("and it resolves to the documented default rather than disabling the plugin", unknownMode.rows.find((row) => row.id === "probe/glm-5.3").contextWindow, 1000000);
+expect("and it resolves to the documented default rather than disabling the plugin", unknownMode.rows.find((row) => row.id === "probe/glm-5.3").contextWindow, catalogRow("zai", "glm-5.3").contextWindow);
 
 /*
  * Scenario 5: packaging invariants. Two of them are load-bearing enough to be
@@ -284,7 +439,7 @@ function suite(label, script, env = {}) {
 		expect(`${label}: the suite is present`, script, "(missing)");
 		return;
 	}
-	const result = spawnSync(process.execPath, [join(HERE, script), ...process.argv.slice(2)], { encoding: "utf8", env: { ...process.env, ...env } });
+	const result = spawnSync(process.execPath, [join(HERE, script), ...process.argv.slice(2)], { encoding: "utf8", env: scenarioEnv(env) });
 	const stdout = result.stdout ?? "";
 	const summary = stdout.trim().split("\n").map((line) => line.trim()).filter((line) => /assertions passed/u.test(line)).pop();
 	const counts = /^(\d+)\/(\d+)\s+.*assertions passed/u.exec(summary ?? "");

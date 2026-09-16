@@ -16,15 +16,21 @@
  * `--purge` on its own means "uninstall and delete": that is the promise the README
  * makes, so it selects the uninstall action instead of re-installing (which is what it
  * used to do, silently). Pairing it with a conflicting action is refused as a usage
- * error. Exit codes: 0 ok, 1 usage error, 2 the requested work did not succeed —
- * `--check` reports 2 when its pre-flight fails, and every value-taking flag is refused
- * when its value is missing rather than falling back to a default target.
+ * error, as is naming two action flags at once (`--apply --uninstall` is not a run with
+ * two halves). Exit codes: 0 ok, 1 usage error, 2 the requested work did not succeed —
+ * a pre-flight that failed, or a write the filesystem refused — and every value-taking
+ * flag is refused when its value is missing rather than falling back to a default target.
+ *
+ * `--purge` deletes the copy, the snapshot the plugin actually reads (the name comes
+ * from `lib/snapshot.mjs`, so `DSH_PI_AI_CATALOG_SNAPSHOT` is honoured) and the
+ * directories the removal emptied.
  *
  * The `--vision` switch never edits the unit file itself: with --unit <name> it writes
  * a systemd drop-in at <unit-dir>/<unit>.d/dsh-model-metadata-input.conf (default
  * <home>/.config/systemd/user), so the unit you (or a panel) may rewrite stays pristine
  * and removal is one file. `--uninstall` and `--purge` remove that drop-in too: without
- * it, a mode override outlives the plugin it configured.
+ * it, a mode override outlives the plugin it configured. Under `--check` the switch only
+ * reports what it would write or remove: a run documented as a report writes nothing.
  * The plugin reads the variable at load, so a restart is what activates it.
  *
  * Layout it creates under the DSH home ($DSH_HOME, else the OS's own home + /.dsh):
@@ -36,12 +42,13 @@
  * removes; a row left without its marker by an older run (or by hand) is recognized by
  * its shape, and a row that merely shares this package's id is left alone.
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { FLAT_SOURCES, homePatchRow, installedManifest, layoutGaps } from "./packaging.mjs";
 import { dshInstall } from "./dev-paths.mjs";
+import { snapshotDefaultPath } from "./lib/snapshot.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -76,7 +83,8 @@ const ROW_ID = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).name
 const USAGE = [
 	"Usage: node install-plugin.mjs [--check|--apply|--update|--uninstall|--purge] [options]",
 	"",
-	"  --check                 report what is installed, and run the pre-flight (exit 2 on failure)",
+	"  --check                 report what is installed, and run the pre-flight (exit 2 on failure);",
+	"                          writes nothing, --vision included",
 	"  --apply                 copy the plugin into the DSH home and register the row",
 	"  --update                same as --apply",
 	"  --uninstall             remove this installer's row; the copied files stay",
@@ -130,25 +138,43 @@ const VALUED = new Map([
 ]);
 
 /**
+ * The flags that pick the run's action, mapped to the action each one names.
+ *
+ * They are a table rather than four branches in {@link parseArgs} because the flags are
+ * also *counted*: a run has one action, so a second flag has to be refused instead of
+ * silently overwriting the first (`--apply --uninstall` used to uninstall).
+ */
+const ACTIONS = new Map([
+	["--check", "check"],
+	["--apply", "apply"],
+	["--update", "update"],
+	["--uninstall", "uninstall"]
+]);
+
+/**
  * The run's options, refusing anything the installer cannot honour.
  * @param argv - the arguments after the script name.
  * @returns `{ action, purge, profile, vision, unit, unitDir, home, install }`.
  */
 function parseArgs(argv) {
 	const options = { action: undefined, purge: false, profile: undefined, vision: undefined, unit: process.env.DSH_UNIT };
+	const actions = [];
 	for (let at = 0; at < argv.length; at++) {
 		const arg = argv[at];
 		if (arg === "--help" || arg === "-h") {
 			console.log(USAGE);
 			process.exit(0);
-		} else if (arg === "--check") options.action = "check";
-		else if (arg === "--apply") options.action = "apply";
-		else if (arg === "--update") options.action = "update";
-		else if (arg === "--uninstall") options.action = "uninstall";
-		else if (arg === "--purge") options.purge = true;
+		} else if (ACTIONS.has(arg)) {
+			options.action = ACTIONS.get(arg);
+			if (!actions.includes(options.action)) actions.push(options.action);
+		} else if (arg === "--purge") options.purge = true;
 		else if (VALUED.has(arg)) options[VALUED.get(arg)] = valueOf(argv, at++, arg);
 		else usage(`unknown argument: ${arg}`);
 	}
+	/* Two action flags used to be a silent last-wins, so `--apply --uninstall` removed the
+	 * install the user had just asked for. Naming them is the same refusal the `--purge`
+	 * contradiction below gets. */
+	if (actions.length > 1) usage(`${actions.map((name) => `--${name}`).join(" and ")} ask for more than one action; pick one`);
 	/* `--purge` is the README's own instruction for "remove it and its files", so alone it
 	 * is an uninstall. Next to an explicit --apply/--check it is a contradiction: doing
 	 * either half would destroy or write files the user did not ask about. */
@@ -171,8 +197,11 @@ const pluginSrc = join(HERE, "lib");
 const pluginDst = join(dshHome, "plugins", "dsh-model-metadata");
 /* Data lives in DSH home, where the plugin reads it and where an update to the plugin
  * cannot throw it away. A copy inside the plugin directory is the leftover of the build
- * that kept it there, and is folded back out on the next run. */
-const snapshotDst = join(dshHome, "models-dev-snapshot.json");
+ * that kept it there, and is folded back out on the next run. The name is not spelled out
+ * here: the plugin honours `DSH_PI_AI_CATALOG_SNAPSHOT` first, and while the installer had
+ * its own copy of the rule a `--purge` deleted the default file the plugin was not using
+ * and left the real one in place. */
+const snapshotDst = snapshotDefaultPath(dshHome);
 const lodgedSnapshot = join(pluginDst, "models-dev-snapshot.json");
 
 /** A YAML scalar for a value: bare when nothing in it needs quoting. */
@@ -380,6 +409,24 @@ function report(icon, message) {
 	console.log(`${icon} ${message}`);
 }
 
+/**
+ * Report a write the filesystem refused as the one-line failure this installer documents,
+ * then exit 2.
+ *
+ * A raw `EACCES` stack trace exits 1 — a code this script does not use — and it arrives
+ * after the writes that already succeeded, so a refused `--purge` read as a crash plus a
+ * half-removed install. The path in the error is the one named, not the DSH home: the copy
+ * may have succeeded and the patch write, in a directory of its own, may be the one that
+ * could not be created.
+ * @param error - the refusal from a filesystem call.
+ */
+function failedWrite(error) {
+	const failed = error?.path;
+	report("FAIL", `cannot write ${typeof failed === "string" && failed.length > 0 ? failed : dshHome}: ${error instanceof Error ? error.message : String(error)}`);
+	report("note", "run this under a sandbox that may write outside the workspace, then retry");
+	process.exit(2);
+}
+
 /** The systemd drop-in directory the `--vision` override lives in. */
 function dropInDir() {
 	return join(options.unitDir === undefined ? join(homedir(), ".config", "systemd", "user") : resolve(options.unitDir), `${String(options.unit)}.d`);
@@ -424,13 +471,39 @@ function removeDropIn() {
 }
 
 /**
- * Narrow (or restore) the input-modality mode. `on` is the plugin's own default,
- * so it removes the drop-in rather than pinning a value that could later drift
- * from the code; only `bundled` and `off` need a unit override.
- * @param mode - `on` removes the drop-in; `bundled`/`off` write it.
- * @returns whether anything changed.
+ * Remove the directories this installer created for its own files, once they hold nothing.
+ *
+ * `rmdirSync` refuses anything but an empty directory, which is exactly the "leave it
+ * alone" case: `$DSH_HOME/plugins` holds other people's plugins, and a profile directory
+ * holds a patch file this run did not necessarily write. Only a directory the purge just
+ * emptied goes away, and it is reported because a purge that quietly leaves scaffolding
+ * behind is how these directories get noticed in the first place.
+ * @returns the directories removed.
  */
-function setVision(mode) {
+function removeEmptyParents() {
+	const parents = [join(dshHome, "plugins")];
+	if (options.profile !== undefined) parents.push(join(dshHome, "profiles", options.profile));
+	const removed = [];
+	for (const directory of parents) {
+		try {
+			rmdirSync(directory);
+			removed.push(directory);
+		} catch {
+			/* Not empty, or never created: leave it alone. */
+		}
+	}
+	return removed;
+}
+
+/**
+ * Refuse a `--vision` request this run cannot honour: the mode has to be one the plugin
+ * understands, and a unit has to be named so the drop-in has a directory to live in.
+ *
+ * Separate from {@link setVision} because the `--check` dry run has to refuse the same two
+ * mistakes while writing nothing at all.
+ * @param mode - the requested mode.
+ */
+function requireVisionArgs(mode) {
 	if (options.unit === undefined) {
 		console.error("--vision needs --unit <name> (or DSH_UNIT) so it knows which systemd drop-in directory to write");
 		console.error(USAGE);
@@ -441,6 +514,33 @@ function setVision(mode) {
 		console.error(USAGE);
 		process.exit(1);
 	}
+}
+
+/**
+ * Say what the requested `--vision` mode would do, without doing it.
+ *
+ * `--check` is the read-only report, and applying the mode there wrote the drop-in and
+ * reloaded the units — a command documented as a report changed the machine. It says the
+ * mode that would be applied instead, so the report still answers what `--vision` would do.
+ */
+function planVision() {
+	requireVisionArgs(options.vision);
+	if (options.vision === "on") {
+		report("note", existsSync(dropInFile()) ? `--vision on would remove ${dropInFile()}` : `--vision on: nothing to remove, and on is the plugin default`);
+		return;
+	}
+	report("note", `--vision ${options.vision} would write ${dropInFile()} (DSH_PI_AI_CATALOG_FALLBACK_INPUT=${options.vision})`);
+}
+
+/**
+ * Narrow (or restore) the input-modality mode. `on` is the plugin's own default,
+ * so it removes the drop-in rather than pinning a value that could later drift
+ * from the code; only `bundled` and `off` need a unit override.
+ * @param mode - `on` removes the drop-in; `bundled`/`off` write it.
+ * @returns whether anything changed.
+ */
+function setVision(mode) {
+	requireVisionArgs(mode);
 	if (mode === "on") {
 		report("note", "on is the plugin default; no unit override needed");
 		return removeDropIn();
@@ -570,43 +670,61 @@ if (options.action === "check") {
 			failed = true;
 		}
 	}
-	if (options.vision !== undefined) {
-		applyVision();
-		report("note", "restart your dsh process to apply it");
-	}
+	if (options.vision !== undefined) planVision();
 	process.exit(failed ? 2 : 0);
 }
 
 if (options.action === "uninstall") {
-	const text = readPatch();
-	if (text === undefined) {
-		report("no-op", `nothing registered in ${patchFile}`);
-	} else {
-		const stripped = stripRows(text);
-		if (stripped.rows > 0 || stripped.markers > 0) {
-			const kept = normalizePatch(stripped.text);
-			writeFileSync(patchFile, `${kept.length === 0 ? "[]" : kept}\n`);
-			if (stripped.rows > 0) report("ok  ", `removed this installer's ${ROW_ID} row (${stripped.names.filter((name) => name !== undefined).join(", ")}) from ${patchFile}`);
-			if (stripped.markers > 0) report("note", `removed ${String(stripped.markers)} stale marker comment(s) with no row of ours under them`);
+	/*
+	 * Every write in this branch can be refused by the filesystem, and a read-only
+	 * `plugins/` (or a read-only patch file) is the easy way to see it: uncaught, the
+	 * refusal printed a stack trace and exited 1 — a code this script does not document —
+	 * after the row had already been removed, which reads as a crash plus a half-uninstall.
+	 * The catch is the install path's, so both halves fail the same way.
+	 */
+	try {
+		const text = readPatch();
+		if (text === undefined) {
+			report("no-op", `nothing registered in ${patchFile}`);
 		} else {
-			report("no-op", `nothing this installer wrote in ${patchFile}`);
+			const stripped = stripRows(text);
+			if (stripped.rows > 0 || stripped.markers > 0) {
+				const kept = normalizePatch(stripped.text);
+				writeFileSync(patchFile, `${kept.length === 0 ? "[]" : kept}\n`);
+				if (stripped.rows > 0) report("ok  ", `removed this installer's ${ROW_ID} row (${stripped.names.filter((name) => name !== undefined).join(", ")}) from ${patchFile}`);
+				if (stripped.markers > 0) report("note", `removed ${String(stripped.markers)} stale marker comment(s) with no row of ours under them`);
+			} else {
+				report("no-op", `nothing this installer wrote in ${patchFile}`);
+			}
 		}
-	}
-	/* The unit drop-in is state this installer wrote too: leaving it behind kept a mode
-	 * override alive after the plugin it configured was gone. */
-	if (removeDropIn()) {
-		const failure = reloadUnits();
-		report(failure === undefined ? "ok  " : "note", failure === undefined ? "systemctl --user daemon-reload" : `daemon-reload: ${failure}`);
-	}
-	/* A row that merely shares our id belongs to whoever wrote it: say so, so a leftover
-	 * row is not mistaken for a failed uninstall. */
-	const left = readPatch();
-	const remaining = left === undefined ? 0 : rowIds(left).filter((id) => id === ROW_ID).length;
-	if (remaining > 0) report("note", `${String(remaining)} row(s) for ${ROW_ID} are still in ${patchFile}, and none of them is this installer's (a bundle or hand-written row); remove it where it was added`);
-	if (options.purge) {
-		rmSync(pluginDst, { recursive: true, force: true });
-		if (existsSync(snapshotDst)) rmSync(snapshotDst, { force: true });
-		report("ok  ", `deleted ${pluginDst} and ${snapshotDst}`);
+		/* The unit drop-in is state this installer wrote too: leaving it behind kept a mode
+		 * override alive after the plugin it configured was gone. */
+		if (removeDropIn()) {
+			const failure = reloadUnits();
+			report(failure === undefined ? "ok  " : "note", failure === undefined ? "systemctl --user daemon-reload" : `daemon-reload: ${failure}`);
+		}
+		/* A row that merely shares our id belongs to whoever wrote it: say so, so a leftover
+		 * row is not mistaken for a failed uninstall. */
+		const left = readPatch();
+		const remaining = left === undefined ? 0 : rowIds(left).filter((id) => id === ROW_ID).length;
+		if (remaining > 0) report("note", `${String(remaining)} row(s) for ${ROW_ID} are still in ${patchFile}, and none of them is this installer's (a bundle or hand-written row); remove it where it was added`);
+		if (options.purge) {
+			/* `lstat`, not `stat`: what sits at the plugin path may be a link someone made, and
+			 * removing the link is not removing the directory it points at. */
+			const link = lstatSync(pluginDst, { throwIfNoEntry: false })?.isSymbolicLink() === true;
+			rmSync(pluginDst, { recursive: true, force: true });
+			report("ok  ", `deleted ${pluginDst}${link ? " (a symlink: the link is gone, the files it pointed at are not touched)" : ""}`);
+			if (existsSync(snapshotDst)) {
+				rmSync(snapshotDst, { force: true });
+				report("ok  ", `deleted the models.dev snapshot at ${snapshotDst}`);
+			} else {
+				report("no-op", `no models.dev snapshot at ${snapshotDst}`);
+			}
+			const emptied = removeEmptyParents();
+			if (emptied.length > 0) report("ok  ", `removed the now-empty ${emptied.join(", ")}`);
+		}
+	} catch (error) {
+		failedWrite(error);
 	}
 	report("note", "restart your dsh process for the change to take effect");
 	process.exit(0);
@@ -675,15 +793,20 @@ report("ok  ", `registered ${ROW_ID} in ${patchFile}`);
 if (options.vision !== undefined) applyVision();
 visionReport();
 } catch (error) {
-	/* Name the path that actually failed: the copy may have succeeded and the patch write,
-	 * in a directory of its own, may be the one that could not be created. */
-	const failed = error?.path;
-	report("FAIL", `cannot write ${typeof failed === "string" && failed.length > 0 ? failed : dshHome}: ${error instanceof Error ? error.message : String(error)}`);
-	report("note", "run this under a sandbox that may write outside the workspace, then retry");
-	process.exit(2);
+	failedWrite(error);
 }
 const flight = await preflight();
-report(flight.ok === undefined ? "FAIL" : "ok  ", `pre-flight: ${flight.ok ?? flight.failure ?? flight.skipped}`);
+/* Three outcomes, three lines — the same three the `--check` branch reports. A skipped
+ * pre-flight is not a failure: with no DSH install to compose against (or one without the
+ * boot module), the copy and the registration both succeeded, and calling that FAIL once
+ * exited 2 on an install that had in fact worked. */
+let preflightFailed = false;
+if (flight.ok !== undefined) report("ok  ", `pre-flight: ${flight.ok}`);
+else if (flight.skipped !== undefined) report("note", `pre-flight: skipped — ${flight.skipped}`);
+else {
+	report("FAIL", `pre-flight: ${flight.failure}`);
+	preflightFailed = true;
+}
 /*
  * The reload boundary, said precisely: the browser half is served per page load, so a
  * refresh is enough for it; the host half is an instance the process loaded at start.
@@ -699,4 +822,4 @@ if (before.length > 0) {
 	report("note", "restart your dsh process to load the plugin");
 }
 report("note", "self-check after restart: look for dsh-model-metadata in dsh's own log (systemd: journalctl --user -u <unit>)");
-if (flight.ok === undefined) process.exit(2);
+if (preflightFailed) process.exit(2);

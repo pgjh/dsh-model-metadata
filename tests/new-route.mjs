@@ -26,7 +26,7 @@
  * the verdict: 0 when all three layers answered, 2 when one of them failed.
  */
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { adapterEntry } from "../dev-paths.mjs";
@@ -42,6 +42,14 @@ const MODELS = ["zzprobe/glm-5.3", "zzprobe/claude-opus-4-6", "zzprobe/whatever-
  * into settings.yaml, and a run that cannot reach a page has no business doing that. */
 const url = appUrl();
 
+/* A backup left behind means a previous run was killed before it could restore (SIGKILL
+ * and power loss run no handler at all): that file is the only copy of the user's own
+ * document, so put it back before this run reads or writes anything. */
+if (existsSync(BACKUP)) {
+	copyFileSync(BACKUP, SETTINGS);
+	rmSync(BACKUP, { force: true });
+	console.log(`recovered ${SETTINGS} from the backup a killed run left behind`);
+}
 const original = readFileSync(SETTINGS);
 copyFileSync(SETTINGS, BACKUP);
 let restored = false;
@@ -61,6 +69,18 @@ process.on("exit", restore);
 process.on("SIGINT", () => {
 	restore();
 	process.exit(130);
+});
+process.on("SIGTERM", () => {
+	restore();
+	process.exit(143);
+});
+/* An uncaught throw would otherwise print a stack and exit without restoring: the tool
+ * writes into the user's own settings document, so every path that leaves the process
+ * goes through `restore()` except a hard kill, which the recovery above covers. */
+process.on("uncaughtException", (error) => {
+	restore();
+	console.error(error);
+	process.exit(1);
 });
 
 /* Add the throwaway route right under `  providers:` — the same shape the shipped

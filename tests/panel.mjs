@@ -119,6 +119,35 @@ expect("the bundle registers itself under the package's own name", [registration
 	expect("twins: capacity spells exactly when it can, and says 约 when it cannot",
 		[client.formatCapacity(1000000), client.formatCapacity(200000), client.formatCapacity(131072), client.formatCapacity(262144), client.formatCapacity(32768), client.formatCapacity(123456), client.formatCapacity(1048576), client.formatCapacity(undefined)],
 		["1M", "200K", "128K", "256K", "32K", "约 123K", "1M", ""]);
+	/*
+	 * The two strings that are not digits — the approximate capacity and the list
+	 * separator — used to be Chinese literals in the code, so the English page showed
+	 * `约 123K` and `a、b、c`. `apply()` is what installs the page's translator, so this
+	 * second call is the "the Settings page is in English" case.
+	 */
+	exportsOf.apply({ ...ctx, locale: { register: () => () => {}, bind: () => (key) => client.en[key] } });
+	expect("with English selected the approximate capacity is English", client.formatCapacity(123456), "~123K");
+	const english = client.readoutOf({ id: "gw/unknown", declared: {}, nearby: [{ id: "sibling-a" }, { id: "sibling-b" }] });
+	expect("and the sibling list is joined the English way", [english.includes("sibling-a, sibling-b"), english.includes("、")], [true, false]);
+	expect("with the field named in English too", english.includes("Capacity"), true);
+	/*
+	 * The memo is the only thing keeping a keystroke in one row from re-rendering every
+	 * cell of the card, and it compares `choice` by identity — so the choice a row derives
+	 * from its declaration has to keep that identity between renders.
+	 */
+	const derive = client.chooseByRow();
+	const memoRow = { id: "gw/memo", declared: {} };
+	expect("a row's derived choice keeps its identity", derive(memoRow) === derive(memoRow), true);
+	expect("a different row gets its own", derive(memoRow) === derive({ id: "gw/other", declared: {} }), false);
+	/* One `classes` object for both prop sets: the comparator compares every prop by
+	 * reference, so the thing under test here is the choice's identity, not this test's. */
+	const memoClasses = {};
+	const memoProps = (choice) => ({ row: memoRow, choice, classes: memoClasses, message: undefined, busy: false, dirty: false });
+	expect("so the memo skips a cell nothing changed for", client.MemoCell.compare(memoProps(derive(memoRow)), memoProps(derive(memoRow))), true);
+	expect("and re-renders one whose choice was rebuilt", client.MemoCell.compare(memoProps(derive(memoRow)), memoProps({ ...derive(memoRow) })), false);
+	/* Back to the language the bundle falls back to: the twins assertions below are written
+	 * against the dictionary that answers when the page offers no locale service. */
+	exportsOf.apply({ ...ctx, locale: { register: () => () => {}, bind: () => (key) => client.zh[key] } });
 	expect("twins: level parsing", [client.parseLevels("low, high, max").value, client.parseLevels("false").value, client.parseLevels("off").value, client.parseLevels("nope").error !== undefined], [{ low: "low", high: "high", max: "max" }, false, { off: null }, true]);
 	/* A named level with no value is a mistake for every level, `off=` included: it used
 	 * to be read as "send nothing" while `low=` errored, so the odd one out was silent. */
@@ -273,10 +302,18 @@ process.env.DSH_PI_AI_CATALOG_REFRESH = "0";
 writeFileSync(process.env.DSH_PI_AI_SETTINGS_FILE, "llm-pi-ai:\\n  providers:\\n    probe-route:\\n      api: openai-responses\\n      baseURL: http://127.0.0.1:1/v1\\n      models:\\n        - id: probe-route/zephyr-9-pro\\n");
 writeFileSync(process.env.DSH_PI_AI_CATALOG_SNAPSHOT, JSON.stringify({ fetchedAt: new Date().toISOString(), source: "probe", providers: 0, count: 0, models: {} }));
 const routes = [];
+const effects = [];
 const plugin = await import(pathToFileURL(pluginPath).href);
 plugin.apply({
 	get: () => undefined,
 	logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+	/* The daily rule is scheduled through the context, so the probe can see both that it
+	 * was asked for and that it was asked for something disposable. */
+	effect: (fn, label) => {
+		const dispose = fn();
+		effects.push({ label, dispose: typeof dispose });
+		return dispose;
+	},
 	inject: (names, callback) => {
 		if (Array.isArray(names) && names.includes("webServer")) callback({ webServer: { register: (route) => { routes.push(route); return () => {}; } }, effect: (fn) => fn() });
 	}
@@ -296,6 +333,8 @@ const answer = (request) => new Promise((resolve) => {
 const host = { host: "app.example" };
 console.log(JSON.stringify({
 	registered: routes.length,
+	effects,
+	dailyMs: plugin.DAILY_CHECK_MS,
 	get: await answer({ method: "GET", url: "/model-metadata/matrix?provider=probe-route", headers: host }),
 	head: await answer({ method: "HEAD", url: "/model-metadata/matrix", headers: host }),
 	post: await answer({ method: "POST", url: "/model-metadata/matrix", headers: host }),
@@ -331,13 +370,20 @@ const plain = routeProbe({}, "plain");
 expect("the panel route is registered exactly once", plain.registered, 1);
 expect("a normal request is answered", [plain.get.status, JSON.parse(plain.get.body).routes.map((route) => route.route)], [200, ["probe-route"]]);
 expect("the body is not sniffable as anything else", plain.get.headers["x-content-type-options"], "nosniff");
-expect("HEAD carries the length of the body it does not send", [plain.head.status, Number(plain.head.headers["content-length"]) > 0, plain.head.body], [200, true, ""]);
+expect("HEAD is answered from the headers alone: no body, and no length computed for one", [plain.head.status, plain.head.body, "content-length" in plain.head.headers], [200, "", false]);
+expect("the daily rule is scheduled as a disposable effect", [plain.effects.map((entry) => entry.label), plain.effects.map((entry) => entry.dispose)], [["dsh-model-metadata: daily refresh check"], ["function"]]);
+expect("checked hourly, so a process that stays up cannot sit on stale data for weeks", plain.dailyMs, 3600000);
 expect("a write is refused, and the refusal says what is accepted", [plain.post.status, plain.post.headers.allow], [405, "GET, HEAD"]);
 expect("a page on another origin cannot read it", plain.crossSite.status, 403);
 expect("nor a request that claims the data for another origin", plain.foreignOrigin.status, 403);
 expect("the app's own page still can", plain.sameOrigin.status, 200);
 const off = routeProbe({ DSH_PI_AI_CATALOG_PANEL: "off" }, "off", false);
 expect("DSH_PI_AI_CATALOG_PANEL=off registers no route at all", off.registered, 0);
+/* An unrecognized value is the documented exception that falls to the *permissive* end
+ * (`on`), not to `off`: this switch is the one whose typo must not silently remove the
+ * controls, and the warning in the log is where it is reported. */
+const unknownPanel = routeProbe({ DSH_PI_AI_CATALOG_PANEL: "maybe" }, "panel-unknown");
+expect("an unrecognized panel value still registers the route", [unknownPanel.registered, unknownPanel.get.status], [1, 200]);
 const hostBound = routeProbe({ DSH_PI_AI_CATALOG_PANEL_HOSTS: " app.example , other.example " }, "hosts");
 expect("a configured host is answered", hostBound.get.status, 200);
 expect("and one that was not configured is not", routeProbe({ DSH_PI_AI_CATALOG_PANEL_HOSTS: "other.example" }, "hosts-miss").get.status, 403);
