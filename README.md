@@ -3,6 +3,7 @@
 [![npm](https://img.shields.io/npm/v/dsh-model-metadata?label=npm&color=cb3837)](https://www.npmjs.com/package/dsh-model-metadata)
 [![license](https://img.shields.io/npm/l/dsh-model-metadata?color=3da639)](LICENSE)
 [![node](https://img.shields.io/node/v/dsh-model-metadata?color=5fa04e)](package.json)
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/pgjh/dsh-model-metadata)
 
 已发布到 npm（`dsh-model-metadata`），源码在 [github.com/pgjh/dsh-model-metadata](https://github.com/pgjh/dsh-model-metadata)。
 
