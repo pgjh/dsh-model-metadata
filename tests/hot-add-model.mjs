@@ -33,7 +33,8 @@ writeFileSync(process.env.DSH_PI_AI_CATALOG_SNAPSHOT, JSON.stringify({ fetchedAt
 process.env.DSH_PI_AI_CATALOG_REFRESH = "0";
 
 const plugin = await import(pathToFileURL(PLUGIN).href);
-const { apply } = await import(pathToFileURL(adapterEntry()).href);
+const adapterModule = await import(pathToFileURL(adapterEntry()).href);
+const { apply } = adapterModule;
 
 const noop = () => {};
 const quiet = quietLogger();
@@ -42,6 +43,9 @@ const ctx = {
 	get: () => undefined,
 	inject: noop,
 	logger: quiet,
+	/* 0.2.x reads the settings namespace off the owning fiber. */
+	fiber: { entry: { options: { id: "llm-pi-ai" } }, state: 2 },
+	on: () => () => {},
 	llm: {
 		registerConfigurableProviders: () => ({ replace: noop }),
 		registerModelDiscovery: noop,
@@ -71,7 +75,10 @@ const providersB = { providers: { probe: route([
 ]) } };
 
 plugin.apply(ctx);
-apply(ctx, providersA);
+/* 0.2.x hands the adapter a schemastery section, read through `.get()`. */
+const { Config } = adapterModule;
+const configFor = (providers) => Config === undefined ? providers : Config(providers);
+apply(ctx, configFor(providersA));
 const adapter = captured.adapter;
 
 const show = async (label, id) => {
@@ -91,7 +98,7 @@ await show("start ", "probe/glm-5.3");
  * profiles source starts answering with the new configuration. Same instance,
  * same prototype wrap, same running process.
  */
-apply(ctx, providersB);
+apply(ctx, configFor(providersB));
 adapter.config.profiles = captured.adapter.config.profiles;
 
 console.log("=== after the settings change, same process (config B) ===");

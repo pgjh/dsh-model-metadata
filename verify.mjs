@@ -12,7 +12,7 @@
  * context window, output cap and reasoning levels without touching route-owned
  * fields or overriding explicit settings.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -264,7 +264,7 @@ expect("declared: an explicit level subset is respected", rowOf(declared, "probe
 expect("declared: the rest of that model is still filled in", rowOf(declared, "probe/kimi-k3").contextWindow, catalogRow("moonshotai", "kimi-k3").contextWindow);
 /* A declaration this plugin's own UI writes: the chain knows the name as
  * image-capable, and the row must keep saying text-only. */
-expect("declared: an explicit input list survives the chain", rowOf(declared, "probe/glm-5v-turbo").input, ["text"]);
+expect("declared: an explicit input list survives the chain", rowOf(declared, "probe/glm-4.6v").input, ["text"]);
 
 /*
  * Scenario 3b: the precedence rule's one dangerous hole. When the plugin cannot read the
@@ -298,21 +298,578 @@ try {
 }
 
 /*
+ * Scenario 3c: the 0.2.x home, where `settings.yaml` no longer exists.
+ *
+ * Since 0.2.0 the settings service renames that document to `settings.yaml.imported`
+ * on start and folds each section into `<home>/profiles/<name>/cordis.patch.yml`.
+ * A plugin that only ever reads `<home>/settings.yaml` therefore finds nothing on
+ * an upgraded install, and its fail-closed rule then turns the metadata fallback
+ * off entirely — the two controls vanish from the Settings page and reasoning
+ * levels stop being offered. So the same declarations must be honoured when they
+ * live in a patch layer, which is a list of `{ id, config }` entries rather than
+ * a mapping of section names.
+ */
+const upgradeDir = mkdtempSync(join(tmpdir(), "dsh-mm-upgrade-"));
+try {
+	/*
+	 * A home with no settings.yaml at all, and a profile patch carrying the same
+	 * rows: this is what the operator's disk looks like after the upgrade.
+	 */
+	const profileDir = join(upgradeDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const patchPath = join(profileDir, "cordis.patch.yml");
+	writeFileSync(patchPath, [
+		"- id: ui-settings-general",
+		"  config:",
+		"    welcomeNoticeVersion: 2026-09-28.1",
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      my-gateway:",
+		"        displayName: my-gateway",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 64000",
+		"            maxTokens: 8000",
+		"            reasoningEfforts: false",
+		"          - id: probe/kimi-k3",
+		"            name: probe/kimi-k3",
+		"            reasoningEfforts:",
+		"              low: low",
+		"              high: high",
+		"          - id: probe/glm-4.6v",
+		"            name: probe/glm-4.6v",
+		"            input:",
+		"              - text",
+		"          - id: probe/glm-5.3",
+		"            name: probe/glm-5.3",
+		""
+	].join("\n"));
+	/*
+	 * The plugin reads the profile patch without being told which profile: the
+	 * `profileContext` service is what knows, and a headless run has none, so the
+	 * newest patch file in the home is what answers. `DSH_HOME` is the whole input
+	 * here — the point of the scenario is that no settings document is required.
+	 */
+	const upgraded = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", patchPath, "--plugin-settings", patchPath], { DSH_HOME: upgradeDir });
+	expect("0.2.x: a patch layer is read as the declarations, not refused", [upgraded.status, upgraded.rows === undefined], [0, false]);
+	expect("0.2.x: an explicit contextWindow in a patch row survives", rowOf(upgraded.rows, "probe/gpt-5.4").contextWindow, 64000);
+	expect("0.2.x: an explicit maxTokens in a patch row survives", rowOf(upgraded.rows, "probe/gpt-5.4").maxTokens, 8000);
+	expect("0.2.x: reasoningEfforts: false in a patch row is respected", rowOf(upgraded.rows, "probe/gpt-5.4").reasoning, []);
+	expect("0.2.x: an explicit level subset in a patch row is respected", rowOf(upgraded.rows, "probe/kimi-k3").reasoning, ["low", "high"]);
+	expect("0.2.x: an explicit input list in a patch row is respected", rowOf(upgraded.rows, "probe/glm-4.6v").input, ["text"]);
+	expect("0.2.x: a row that declares nothing is still filled from the chain", rowOf(upgraded.rows, "probe/glm-5.3").contextWindow, catalogRow("zai", "glm-5.3").contextWindow);
+
+	/*
+	 * And the shape alone is not enough: the same file has to answer when it is the
+	 * only thing on disk, found by discovery rather than passed by name. That is the
+	 * operator's actual case — nothing points the plugin at the profile patch.
+	 */
+	const discovered = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", patchPath, "--plugin-settings-auto"], { DSH_HOME: upgradeDir });
+	expect("0.2.x: the profile patch is found without being named", [discovered.status, rowOf(discovered.rows, "probe/gpt-5.4").contextWindow], [0, 64000]);
+
+	/*
+	 * A patch layer that parses but carries no llm-pi-ai row declares nothing, which
+	 * is not the same as being unreadable: the chain must still fill rows in.
+	 */
+	const otherProfile = join(upgradeDir, "profiles", "headless");
+	mkdirSync(otherProfile, { recursive: true });
+	const otherPatch = join(otherProfile, "cordis.patch.yml");
+	writeFileSync(otherPatch, "- id: ui-settings-general\n  config: {}\n");
+	const unrelated = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", PRECEDENCE, "--plugin-settings", otherPatch], { DSH_HOME: upgradeDir });
+	expect("0.2.x: a patch layer with no llm-pi-ai row is readable and declares nothing", [unrelated.status, rowOf(unrelated.rows, "probe/glm-5.3").contextWindow], [0, catalogRow("zai", "glm-5.3").contextWindow]);
+} finally {
+	rmSync(upgradeDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3d: the two layers 0.2.x composes, and the order between them.
+ *
+ * `readProfilePatches()` reads the profile patch and then `<home>/cordis.patch.yml`,
+ * and `applyEntryPatches` lets the later row replace the earlier row's config. So
+ * the home layer is not an alternative to the profile one — it composes *after* it,
+ * and a plugin that reads only one of the two sees a strict subset of what DSH
+ * resolves. That shows up twice: a route declared only in the home layer is missing
+ * from the panel, and a home row that restates a model's limits loses to the
+ * profile row, because the plugin never sees the value that is actually in force.
+ */
+const layeredDir = mkdtempSync(join(tmpdir(), "dsh-mm-layered-"));
+try {
+	const profileDir = join(layeredDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const profilePatch = join(profileDir, "cordis.patch.yml");
+	/*
+	 * The profile layer declares the route and one limit; the home layer restates a
+	 * different limit and adds a second route the profile never mentions.
+	 */
+	writeFileSync(profilePatch, [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      shared:",
+		"        displayName: shared",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 111111",
+		"            maxTokens: 2222",
+		""
+	].join("\n"));
+	writeFileSync(join(layeredDir, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      shared:",
+		"        displayName: shared",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 333333",
+		"      home-only:",
+		"        displayName: home-only",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/kimi-k3",
+		"            name: probe/kimi-k3",
+		"            maxTokens: 4444",
+		""
+	].join("\n"));
+	/*
+	 * The adapter is fed the composed result the way DSH composes it, so the plugin's
+	 * view and the adapter's view can be compared: whatever the plugin thinks is
+	 * declared has to be what the adapter was given.
+	 */
+	const composed = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", join(layeredDir, "cordis.patch.yml"), "--plugin-settings-auto"], { DSH_HOME: layeredDir });
+	expect("layers: a route declared only in the home layer still reaches the panel", [composed.status, composed.rows.some((row) => row.provider === "home-only")], [0, true]);
+	expect("layers: the home layer's row wins over the profile layer's, as the Loader composes them", rowOf(composed.rows, "probe/gpt-5.4").contextWindow, 333333);
+	/*
+	 * A patch row replaces the target entry's `config` wholesale (`applyEntryPatches`
+	 * assigns each override key), so the home layer's `llm-pi-ai` row does not merge
+	 * into the profile layer's — it supersedes it. `maxTokens` therefore stops being
+	 * declared at all and the catalog fills it, which is the value DSH itself resolves.
+	 */
+	expect("layers: the home row supersedes the profile row's config rather than merging", rowOf(composed.rows, "probe/gpt-5.4").maxTokens, catalogRow("openai", "gpt-5.4").maxTokens);
+	expect("layers: a home-only row's own declaration survives", rowOf(composed.rows, "probe/kimi-k3").maxTokens, 4444);
+} finally {
+	rmSync(layeredDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3e: a profile that has never been edited.
+ *
+ * `profileContext.patchPath` names the running profile even when no file is there
+ * yet. Discovery must not then reach for a *different* profile's patch: that mixes
+ * declarations from a profile that is not running into the one that is, which is
+ * how the panel ends up listing routes nobody configured.
+ */
+const uneditedDir = mkdtempSync(join(tmpdir(), "dsh-mm-unedited-"));
+try {
+	/*
+	 * An inactive profile whose patch declares the same route with a distinctive
+	 * `contextWindow`, and a home layer that declares the route without one. If the
+	 * plugin reaches for the inactive profile it believes 555555 is declared and keeps
+	 * it; reading only the running profile (which has no patch) plus the home layer
+	 * leaves the catalog's value in place. Both outcomes are distinguishable, which is
+	 * the point — a scenario where they coincide proves nothing.
+	 */
+	const stale = join(uneditedDir, "profiles", "stale");
+	mkdirSync(stale, { recursive: true });
+	writeFileSync(join(stale, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 555555",
+		""
+	].join("\n"));
+	/*
+	 * The home layer must declare an UNRELATED section. A home `llm-pi-ai` row would
+	 * replace the stale profile's whole section during composition, wiping the
+	 * `contextWindow: 555555` the scenario depends on — so the test would pass even
+	 * if discovery wrongly selected the stale profile. Keeping the home layer away
+	 * from `llm-pi-ai` leaves that value visible to anything that reads it.
+	 */
+	writeFileSync(join(uneditedDir, "cordis.patch.yml"), [
+		"- id: some-other-plugin",
+		"  config:",
+		"    someSetting: true",
+		""
+	].join("\n"));
+	/* What the adapter is fed: the same route, declaring nothing. */
+	const adapterSettings = join(uneditedDir, "adapter-settings.yaml");
+	writeFileSync(adapterSettings, [
+		"llm-pi-ai:",
+		"  providers:",
+		"    probe:",
+		"      displayName: probe",
+		"      api: openai-responses",
+		"      baseURL: http://127.0.0.1:1/v1",
+		"      models:",
+		"        - id: probe/gpt-5.4",
+		"          name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	/*
+	 * `DSH_PI_AI_SETTINGS_FILE` cannot express this case — it names a file, and the
+	 * point is that nothing is named. So the service is supplied instead and the
+	 * plugin is left to discover the rest: `--profile-patch` points at a patch that
+	 * does not exist, exactly as a profile nobody has edited yet looks.
+	 */
+	const unedited = runRaw(
+		["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto", "--profile-patch", join(uneditedDir, "profiles", "web", "cordis.patch.yml")],
+		{ DSH_HOME: uneditedDir }
+	);
+	/*
+	 * Assert on the plugin's own view of the declarations, not on the resolved value:
+	 * selecting the stale profile would make `555555` look declared, which is the
+	 * behaviour under test. The resolved value is reported alongside so a failure says
+	 * which of the two happened.
+	 */
+	const uneditedRow = rowOf(unedited.rows, "probe/gpt-5.4");
+	expect(
+		"an unedited running profile does not fall back to another profile's declarations",
+		[unedited.status, uneditedRow.declared, uneditedRow.contextWindow],
+		[0, undefined, catalogRow("openai", "gpt-5.4").contextWindow]
+	);
+} finally {
+	rmSync(uneditedDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3f: what the layers do when one of them cannot be read.
+ *
+ * `existingPatchLayers()` drops the layers that are not there, so an error reaching
+ * the reader means the file exists and could not be opened. Treating that as
+ * "declares nothing" would honor the other layers while the failing one holds
+ * declarations this plugin cannot see — the exact borrow-over-invisible-declarations
+ * failure the fail-closed rule exists to prevent. And the composed answer has to be
+ * dropped with it, because the settings panel reads it without consulting the flag
+ * and writes the whole `providers.<route>.models` array back: a partial document
+ * would present superseded rows as stored declarations and could persist them.
+ */
+const unreadableDir = mkdtempSync(join(tmpdir(), "dsh-mm-unreadable-"));
+try {
+	const profileDir = join(unreadableDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const profilePatch = join(profileDir, "cordis.patch.yml");
+	writeFileSync(profilePatch, [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 111111",
+		""
+	].join("\n"));
+	const homePatch = join(unreadableDir, "cordis.patch.yml");
+	writeFileSync(homePatch, [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	const adapterSettings = join(unreadableDir, "adapter-settings.yaml");
+	writeFileSync(adapterSettings, [
+		"llm-pi-ai:",
+		"  providers:",
+		"    probe:",
+		"      displayName: probe",
+		"      api: openai-responses",
+		"      baseURL: http://127.0.0.1:1/v1",
+		"      models:",
+		"        - id: probe/gpt-5.4",
+		"          name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	try {
+		chmodSync(homePatch, 0o000);
+		const denied = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto", "--profile-patch", profilePatch], { DSH_HOME: unreadableDir });
+		expect("an unreadable layer is reported", denied.stderr.includes("cannot read"), true);
+		/*
+		 * 262144 is the route default, which is what enrichment being off produces.
+		 * The point is that it is not 111111: the readable layer's declaration must
+		 * not be honored while the other layer's declarations are invisible.
+		 */
+		expect("and an unreadable layer disables enrichment instead of honoring the rest", rowOf(denied.rows, "probe/gpt-5.4").contextWindow, 262144);
+	} finally {
+		chmodSync(homePatch, 0o644);
+	}
+} finally {
+	rmSync(unreadableDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3g: an `insert:` row declares entries too.
+ *
+ * This package's own `cordis.patch.yml` adds its plugin row with `- insert:`, and
+ * `applyEntryPatches` pushes those rows into the target group — so an operator
+ * copying that form to declare a settings section would otherwise declare into a
+ * void: the routes vanish from the panel and enrichment borrows over limits it
+ * cannot see.
+ */
+const insertDir = mkdtempSync(join(tmpdir(), "dsh-mm-insert-"));
+try {
+	const profileDir = join(insertDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const insertPatch = join(profileDir, "cordis.patch.yml");
+	writeFileSync(insertPatch, [
+		"- insert:",
+		"    - id: llm-pi-ai",
+		"      config:",
+		"        providers:",
+		"          probe:",
+		"            displayName: probe",
+		"            api: openai-responses",
+		"            baseURL: http://127.0.0.1:1/v1",
+		"            models:",
+		"              - id: probe/gpt-5.4",
+		"                name: probe/gpt-5.4",
+		"                contextWindow: 777777",
+		""
+	].join("\n"));
+	const inserted = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", insertPatch, "--plugin-settings-auto", "--profile-patch", insertPatch], { DSH_HOME: insertDir });
+	expect("insert: a section declared through an insert row is read", [inserted.status, rowOf(inserted.rows, "probe/gpt-5.4").contextWindow], [0, 777777]);
+} finally {
+	rmSync(insertDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3h: a profile layer that cannot be read.
+ *
+ * `existsSync()` answers false for every failure, so an EACCES on the profile
+ * directory looked exactly like a profile that was never edited: the layer was
+ * dropped as "declares nothing" and the home layer was composed from — while the
+ * running adapter still held the declarations this plugin had stopped seeing. The
+ * home layer below declares the same route without the limit, so a partial view
+ * resolves to the catalog's value instead of the declared one.
+ */
+const hiddenDir = mkdtempSync(join(tmpdir(), "dsh-mm-hidden-"));
+try {
+	const profileDir = join(hiddenDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const profilePatch = join(profileDir, "cordis.patch.yml");
+	writeFileSync(profilePatch, [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 888888",
+		""
+	].join("\n"));
+	writeFileSync(join(hiddenDir, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	const adapterSettings = join(hiddenDir, "adapter-settings.yaml");
+	writeFileSync(adapterSettings, [
+		"llm-pi-ai:",
+		"  providers:",
+		"    probe:",
+		"      displayName: probe",
+		"      api: openai-responses",
+		"      baseURL: http://127.0.0.1:1/v1",
+		"      models:",
+		"        - id: probe/gpt-5.4",
+		"          name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	try {
+		/* The profile directory becomes untraversable, so stat on its patch fails EACCES. */
+		chmodSync(profileDir, 0o000);
+		const hidden = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto", "--profile-patch", profilePatch], { DSH_HOME: hiddenDir });
+		expect("an unreadable profile layer is reported, not skipped", hidden.stderr.includes("cannot read"), true);
+		/*
+		 * 262144 is the route default, which is what enrichment being off produces.
+		 * The catalog's 272000 is the value a partial view would resolve to — the
+		 * home layer composes over the profile one and the declared limit is invisible.
+		 */
+		expect("an unreadable profile layer disables enrichment instead of being skipped", [hidden.status, rowOf(hidden.rows, "probe/gpt-5.4").contextWindow], [0, 262144]);
+	} finally {
+		chmodSync(profileDir, 0o755);
+	}
+} finally {
+	rmSync(hiddenDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3i: the same permission failure, reached by discovery.
+ *
+ * Scenario 3h supplies the service, so it never exercises the other branch: with no
+ * `profileContext` the plugin ranks candidate layers by mtime, and a `statSync`
+ * that fails for a reason other than absence used to be dropped as "no patch file
+ * in that profile". A profile directory that cannot be traversed then vanished,
+ * an *older* profile or the home layer composed in its place, and the result looked
+ * complete — while the running adapter still held the declarations.
+ */
+const discoverDir = mkdtempSync(join(tmpdir(), "dsh-mm-discover-"));
+try {
+	const profileDir = join(discoverDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const profilePatch = join(profileDir, "cordis.patch.yml");
+	writeFileSync(profilePatch, [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 999999",
+		""
+	].join("\n"));
+	/* A readable home layer that declares the same route without the limit. */
+	writeFileSync(join(discoverDir, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	const adapterSettings = join(discoverDir, "adapter-settings.yaml");
+	writeFileSync(adapterSettings, [
+		"llm-pi-ai:",
+		"  providers:",
+		"    probe:",
+		"      displayName: probe",
+		"      api: openai-responses",
+		"      baseURL: http://127.0.0.1:1/v1",
+		"      models:",
+		"        - id: probe/gpt-5.4",
+		"          name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	try {
+		chmodSync(profileDir, 0o000);
+		/*
+		 * No `--profile-patch`: this is the discovery branch, which is the one under
+		 * test. 262144 is the route default (enrichment off); 272000 would be the
+		 * partial view the home layer alone resolves to.
+		 */
+		const discovered = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto"], { DSH_HOME: discoverDir });
+		expect("discovery reports a layer it could not read", discovered.stderr.includes("cannot read"), true);
+		expect("discovery does not compose from the layers it can reach", [discovered.status, rowOf(discovered.rows, "probe/gpt-5.4").contextWindow], [0, 262144]);
+	} finally {
+		chmodSync(profileDir, 0o755);
+	}
+} finally {
+	rmSync(discoverDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3j: a profiles directory that cannot be listed.
+ *
+ * The other half of the same failure. `readdirSync` on the profiles directory threw
+ * out of discovery, which is out of model resolution — a degraded install is not a
+ * crash. It now becomes the unreadable-document case like any other layer failure.
+ */
+const listedDir = mkdtempSync(join(tmpdir(), "dsh-mm-listed-"));
+try {
+	mkdirSync(join(listedDir, "profiles"), { recursive: true });
+	writeFileSync(join(listedDir, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	const adapterSettings = join(listedDir, "adapter-settings.yaml");
+	writeFileSync(adapterSettings, [
+		"llm-pi-ai:",
+		"  providers:",
+		"    probe:",
+		"      displayName: probe",
+		"      api: openai-responses",
+		"      baseURL: http://127.0.0.1:1/v1",
+		"      models:",
+		"        - id: probe/gpt-5.4",
+		"          name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	try {
+		chmodSync(join(listedDir, "profiles"), 0o000);
+		const unlisted = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto"], { DSH_HOME: listedDir });
+		expect("a profiles directory that cannot be listed is reported", unlisted.stderr.includes("cannot read"), true);
+		/* Degrades, never throws: the run completes and enrichment is off. */
+		expect("a profiles directory that cannot be listed degrades instead of throwing", [unlisted.status, rowOf(unlisted.rows, "probe/gpt-5.4").contextWindow], [0, 262144]);
+	} finally {
+		chmodSync(join(listedDir, "profiles"), 0o755);
+	}
+} finally {
+	rmSync(listedDir, { recursive: true, force: true });
+}
+
+/*
  * Scenario 4: input modalities ride the same chain by default, with narrower
  * settings available, because claiming image support an endpoint lacks fails a
  * turn instead of refusing the attachment.
  */
-expect("input: the chain decides images by default", rowOf(plugin, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
-expect("input: and that catalog row is not text-only, or this scenario would prove nothing", catalogInput("zai-coding-cn", "glm-5v-turbo").includes("image"), true);
+expect("input: the chain decides images by default", rowOf(plugin, "probe/glm-4.6v").input, catalogInput("zai-coding-cn", "glm-4.6v"));
+expect("input: and that catalog row is not text-only, or this scenario would prove nothing", catalogInput("zai-coding-cn", "glm-4.6v").includes("image"), true);
 expect("input: a text-only upstream keeps the model text-only", rowOf(plugin, "probe/glm-5.3").input, catalogInput("zai", "glm-5.3"));
 expect("input: the official route's own vision model declares image", rowOf(plugin, "probe/deepseek-v41-flash").input, officialInput("deepseek-flash"));
 const noInput = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "off" });
-expect("input=off: no modality is filled in", rowOf(noInput, "probe/glm-5v-turbo").input, ["text"]);
+expect("input=off: no modality is filled in", rowOf(noInput, "probe/glm-4.6v").input, ["text"]);
 const withInput = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "on" });
-expect("input=on: a vision model declares image", rowOf(withInput, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("input=on: a vision model declares image", rowOf(withInput, "probe/glm-4.6v").input, catalogInput("zai-coding-cn", "glm-4.6v"));
 expect("input=on: a models.dev-only claim is honoured too", rowOf(withInput, "probe/zephyr-9-pro").input, ["text", "image"]);
 const bundledOnly = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "bundled" });
-expect("input=bundled: the shipped catalog's claim still applies", rowOf(bundledOnly, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("input=bundled: the shipped catalog's claim still applies", rowOf(bundledOnly, "probe/glm-4.6v").input, catalogInput("zai-coding-cn", "glm-4.6v"));
 expect("input=bundled: the official deepseek catalog counts as shipped", rowOf(bundledOnly, "probe/deepseek-v41-flash").input, officialInput("deepseek-flash"));
 expect("input=bundled: a models.dev-only claim is ignored", rowOf(bundledOnly, "probe/zephyr-9-pro").input, ["text"]);
 
@@ -344,7 +901,7 @@ expect("fallback=context: capacities are still filled in", rowOf(contextOnly, "p
  * be able to see which half is off here.
  */
 expect("fallback=context: and reasoning is left to the seam", rowOf(contextOnly, "probe/glm-5.3").reasoning, []);
-expect("fallback=context: while image support still rides the chain", rowOf(contextOnly, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("fallback=context: while image support still rides the chain", rowOf(contextOnly, "probe/glm-4.6v").input, catalogInput("zai-coding-cn", "glm-4.6v"));
 /*
  * Reasoning levels are chosen the same way input modalities are, and for the same
  * reason: a bare `reasoning: true` from a mirror becomes five offered levels, which
@@ -459,6 +1016,19 @@ suite("refresh policy (disabled)", "tests/refresh-policy.mjs", { DSH_CATALOG_FAL
 suite("settings panel", "tests/panel.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });
 suite("unit", "tests/unit.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });
 suite("install-plugin", "tests/install-plugin.mjs");
+
+/*
+ * Scenario 7: the diagnostic's own argument parsing.
+ *
+ * `--profile-patch` had its own inline branch that only rejected a missing value, so
+ * `--profile-patch --plugin-settings-auto` consumed the flag as a filename — and then
+ * fell back to scratch settings, which looks exactly like a run that found no
+ * declarations. Every other valued option already refused flag-shaped values.
+ */
+{
+	const probe = spawnSync(process.execPath, [join(HERE, "test-fallback.mjs"), "--source", ADAPTER, "--settings", PRECEDENCE, "--profile-patch", "--plugin-settings-auto"], { encoding: "utf8", env: scenarioEnv({ DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN }) });
+	expect("diagnostic: a flag where --profile-patch expects a path is refused", [probe.status, (probe.stderr ?? "").includes("needs a value")], [1, true]);
+}
 
 console.log("");
 console.log(`${String(checks - failures.length)}/${String(checks)} assertions passed`);

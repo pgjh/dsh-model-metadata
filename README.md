@@ -122,7 +122,46 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 | `DSH_PI_AI_CATALOG_PANEL` | `on` | `off` = 根本不注册界面数据路由（补全本身不受影响，只是编辑器里不会出现那两行控件，也不会显示任何报错）。注意它同时会关掉「数据超过 6 小时、打开界面时更新」这个时机——那个时机就是这条路由被请求时触发的 |
 | `DSH_PI_AI_CATALOG_PANEL_HOSTS` | 不设 = 任何 Host | 逗号分隔的 Host 白名单：只回应列出来的 Host，不在其中的一律拒绝；反代后面用 |
 | `DSH_CATALOG_FALLBACK_NODE_MODULES` | 不设 | 额外的一个 `node_modules` 根目录：找不到 DSH 的包时从这里找 |
-| `DSH_PI_AI_SETTINGS_FILE` | `$DSH_HOME/settings.yaml` | 读哪个设置文档（判断哪些字段是你自己声明的） |
+| `DSH_PI_AI_SETTINGS_FILE` | 自动（见下） | 读哪个设置文档（判断哪些字段是你自己声明的） |
+
+### dsh 0.2.x：设置文档搬到了 profile 补丁里
+
+从 0.2.0 起，`$DSH_HOME/settings.yaml` 这个形态被去掉了：启动时设置服务会把它改名成 `settings.yaml.imported`，各段并进 `$DSH_HOME/profiles/<profile名>/cordis.patch.yml`——那里是一个 Loader 补丁列表，每行长这样：
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      my-gateway:
+        api: openai-responses
+        models:
+          - id: my-gateway/gpt-4o
+            name: gpt-4o
+```
+
+插件按下面顺序找这份文档，找到的第一个就用：
+
+1. **`DSH_PI_AI_SETTINGS_FILE`**（如果你设了）——它可以是旧形态的 `llm-pi-ai:` 文档，也可以直接指向某个 `cordis.patch.yml`，两种都认；
+2. **`$DSH_HOME/settings.yaml`**——dsh 0.1.x 的 home，或者你手工放回去的文档；
+3. **`$DSH_HOME/profiles/*/cordis.patch.yml`**——0.2.x 的 home。插件先问 `profileContext` 服务当前正在跑的是哪个 profile（拿不到服务时——比如在命令行工具里跑——就退而求其次，取补丁文件 mtime 最新的那个）；
+4. 以上都没有：报"没有设置文档"，和以前一样**完全不补**。
+
+第 3 条就是为什么 0.2.x 上升级之后开关还在：不用你手动建镜像文件、也不用设环境变量，插件自己就找得到。`llm-deepseek` 段也一样——它同样搬进了补丁，所以官方 DeepSeek 路由目录里被手工改过的部分照样能用。
+
+补丁可能有两层，读法跟 DSH 自己一样：`profiles/<profile名>/cordis.patch.yml` 先、`<home>/cordis.patch.yml` 后，两个都存在就都读。这不是二选一——home 层里声明的路由 profile 层没提，照样算声明；同一个段在两处都写了，以 home 层为准（Loader 就是后写的整段替换先写的）。「当前跑的是哪个 profile」从 `profileContext` 服务问；服务不在（命令行工具、无头运行）就退而取 mtime 最新的那个补丁。注意这个退化只发生在问不到 profile 的情况下：如果服务说当前 profile 的补丁还不存在（没编辑过的 profile），就**不会**去读别的 profile 的补丁——那是另一个配置的声明。
+
+补丁里**没有** `llm-pi-ai` 行不等于读不到：那是"读到了、但什么都没声明"，照常补全。只有整个补丁文件语法坏了才算读不到——半写的补丁就是半写的声明，和以前对坏文档的处理一样。
+
+`- insert:` 形式的行也算声明。这个包自己的 `cordis.patch.yml` 就是用这种写法加插件行的，所以照着它写 `llm-pi-ai` 段也没问题：
+
+```yaml
+- insert:
+    - id: llm-pi-ai
+      config:
+        providers: { … }
+```
+
+"读不到"和"不存在"是两件事：只有 `ENOENT`（真的没这个文件）才当作没声明；权限不够、I/O 错误这类一律算"读不到"，此时插件**完全不补**（而不是拿剩下的层凑一份），因为运行中的 DSH 手里还握着它看不见的那部分声明。
 
 `DSH_PI_AI_CATALOG_FALLBACK_LEVELS` 是为什么存在的：镜像站对某些模型只给一个"会推理"的裸标记、没有等级细节，把它当作"低/中/高都行"可能给端点送去它当场就拒绝的等级——和图片那个开关防的是同一类过度声明。设成 `bundled` 时，自带目录（它们本来就带等级映射）说了算，models.dev 只用来补容量。
 

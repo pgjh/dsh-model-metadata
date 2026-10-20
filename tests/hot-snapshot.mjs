@@ -46,9 +46,16 @@ const providers = { providers: { probe: { displayName: "probe", api: "openai-res
 const captured = {};
 const { logger: quiet, warnings } = recordingLogger();
 const plugin = await import(pathToFileURL(PLUGIN).href);
-const { apply } = await import(pathToFileURL(ADAPTER).href);
+const adapterModule = await import(pathToFileURL(ADAPTER).href);
+const { apply } = adapterModule;
+/* 0.2.x reads the routes through a schemastery section (`config.providers.get()`). */
+const configFor = (providers) => adapterModule.Config === undefined ? providers : adapterModule.Config(providers);
+/* The 0.2.x adapter reads the settings namespace off the owning fiber and
+ * subscribes to config changes, so both stubs carry one. */
+const fiber = { entry: { options: { id: "llm-pi-ai" } }, state: 2 };
+const on = () => () => {};
 plugin.apply({ get: () => undefined, inject: () => {}, logger: quiet });
-apply({ get: () => undefined, inject: () => {}, logger: quiet, llm: { registerConfigurableProviders: () => ({ replace: () => {} }), registerModelDiscovery: () => {}, registerAdapter: (_routes, adapter) => { captured.adapter = adapter; return { replace: () => {} }; } } }, providers);
+apply({ get: () => undefined, inject: () => {}, logger: quiet, fiber, on, llm: { registerConfigurableProviders: () => ({ replace: () => {} }), registerModelDiscovery: () => {}, registerAdapter: (_routes, adapter) => { captured.adapter = adapter; return { replace: () => {} }; } } }, configFor(providers));
 const adapter = captured.adapter;
 const infoOf = (id) => adapter.resolveModel("probe", id);
 const contextOf = async (id) => (await infoOf(id)).context?.contextWindow;

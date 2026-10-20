@@ -33,9 +33,10 @@ delete process.env.DSH_PI_AI_CATALOG_REFRESH; // default policy: refresh a missi
 const noop = () => {};
 const captured = {};
 const plugin = await import(pathToFileURL(PLUGIN).href);
-const { apply } = await import(pathToFileURL(ADAPTER).href);
+const adapterModule = await import(pathToFileURL(ADAPTER).href);
+const { apply } = adapterModule;
 plugin.apply({ get: () => undefined, inject: noop, logger: { debug: noop, info: console.log, warn: console.error, error: console.error } });
-apply({ get: () => undefined, inject: noop, logger: { debug: noop, info: noop, warn: noop, error: noop }, llm: { registerConfigurableProviders: () => ({ replace: noop }), registerModelDiscovery: noop, registerAdapter: (_routes, adapter) => { captured.adapter = adapter; return { replace: noop }; } } }, { providers: { probe: { api: "openai-responses", baseURL: "http://127.0.0.1:1/v1", models: [{ id: "probe/deepseek-v4.1-flash", name: "probe/deepseek-v4.1-flash" }] } } });
+apply({ get: () => undefined, inject: noop, fiber: { entry: { options: { id: "llm-pi-ai" } }, state: 2 }, on: () => () => {}, logger: { debug: noop, info: noop, warn: noop, error: noop }, llm: { registerConfigurableProviders: () => ({ replace: noop }), registerModelDiscovery: noop, registerAdapter: (_routes, adapter) => { captured.adapter = adapter; return { replace: noop }; } } }, adapterModule.Config === undefined ? { providers: { probe: { api: "openai-responses", baseURL: "http://127.0.0.1:1/v1", models: [{ id: "probe/deepseek-v4.1-flash", name: "probe/deepseek-v4.1-flash" }] } } } : adapterModule.Config({ providers: { probe: { api: "openai-responses", baseURL: "http://127.0.0.1:1/v1", models: [{ id: "probe/deepseek-v4.1-flash", name: "probe/deepseek-v4.1-flash" }] } } }));
 
 console.log(`waiting for the plugin to write ${SNAPSHOT} (deadline ${String(Math.round(DEADLINE_MS / 1000))}s)`);
 const before = plugin.inspect("probe/deepseek-v4.1-flash");

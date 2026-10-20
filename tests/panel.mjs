@@ -32,7 +32,7 @@ const providers = {
 		api: "openai-responses",
 		models: [
 			{ id: "probe/glm-5.3", name: "probe/glm-5.3" },
-			{ id: "probe/glm-5v-turbo", name: "probe/glm-5v-turbo", compat: { supportsStore: false } },
+			{ id: "probe/glm-4.6v", name: "probe/glm-4.6v", compat: { supportsStore: false } },
 			{ id: "probe/qwen-3.8-max", name: "probe/qwen-3.8-max" }
 		]
 	}
@@ -43,7 +43,7 @@ const inspect = (id) => id === "probe/qwen-3.8-max"
 
 const matrix = panel.buildMatrix(providers, inspect);
 expect("matrix lists the configured route", matrix.routes.map((route) => route.route), ["my-gateway"]);
-expect("matrix lists every model", matrix.routes[0].models.map((row) => row.id), ["probe/glm-5.3", "probe/glm-5v-turbo", "probe/qwen-3.8-max"]);
+expect("matrix lists every model", matrix.routes[0].models.map((row) => row.id), ["probe/glm-5.3", "probe/glm-4.6v", "probe/qwen-3.8-max"]);
 expect("an unmatched model is reported as unmatched", matrix.routes[0].models[2].matched, undefined);
 expect("an unmatched model carries its near neighbours for the hint line", [matrix.routes[0].models[2].nearby?.[0]?.id, matrix.routes[0].models[2].nearby?.length], ["qwen3.8-max-plus", 1]);
 expect("a matched model carries no near-neighbour noise", matrix.routes[0].models[0].nearby, undefined);

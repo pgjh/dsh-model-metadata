@@ -2,6 +2,43 @@
 
 这里记的是**用户能看到的变化**，倒序排列。历史更细的改动见 git 提交记录。
 
+## 0.3.1
+
+### 修复
+
+- **在 dsh 0.2.x 上找得到你的声明了**：从 0.2.0 起，`$DSH_HOME/settings.yaml` 这个形态被去掉——设置服务启动时把它改名成 `settings.yaml.imported`，各段并进 `$DSH_HOME/profiles/<profile名>/cordis.patch.yml`。插件此前只认前者，于是在升级后的 home 上判定"读不到声明"：设置 → 模型里的**两个开关不出现**（面板数据路由的矩阵为空，没有行可渲染），而且 0.3.0 的 fail-closed 规则会把**推理等级补全也一起停掉**——模型选择器里那个等级菜单同样是死的。现在插件按顺序找：`DSH_PI_AI_SETTINGS_FILE` → `$DSH_HOME/settings.yaml` → profile 补丁（先问 `profileContext` 当前跑的是哪个 profile，拿不到就取 mtime 最新的补丁文件）。`llm-deepseek` 段同样处理，所以官方路由目录里被手工改过的部分也照样生效。
+- **补丁里没有 `llm-pi-ai` 行不再等于读不到**：那是"读到了、但什么都没声明"，照常补全；只有补丁文件本身语法坏了才算读不到。
+- **`DSH_PI_AI_SETTINGS_FILE` 现在两种形态都收**：旧形态的 `llm-pi-ai:` 文档，或直接指向一个 `cordis.patch.yml`。
+- **测试工具适配 0.2.x 的适配器接口**：0.2.x 的 `apply()` 从 `ctx.fiber.entry.options.id` 取设置命名空间、经 `ctx.on` 订阅配置变更，并把配置作为 schemastery 段传入（`config.providers.get()`）而不是普通对象。`verify.mjs`、`test-fallback.mjs` 以及 hot-snapshot / hot-add-model / live-refresh 三个套件此前都在厂商代码里就崩了（`Cannot read properties of undefined (reading 'entry')`），CI 从 0.2.0-rc.2 发布起就没再真正跑过。
+
+### 测试
+
+- 新增一组回归场景：一个**没有 `settings.yaml`** 的 home，声明放在 `profiles/<名>/cordis.patch.yml` 里——补丁行里的 `contextWindow`、`maxTokens`、`reasoningEfforts: false`、`reasoningEfforts` 子集、`input` 都必须在最终解析结果里生效；不作任何声明的那行仍由目录补全；只带无关行的补丁算"可读但不声明"。其中"不指名文件、由插件自己发现"的那条断言，去掉本次修复会失败（实测四条核心断言全红），所以它挡的正是这次的回归。
+- `test-fallback.mjs` 的 `--settings` / `--plugin-settings` 现在两种文档形态都吃；新增 `--plugin-settings-auto`，让插件在完全不被告知路径的情况下自行发现。
+- 目录夹具跟进：`zai-coding-cn/glm-5v-turbo` 已不在自带目录里，改用同一路由下现在带视觉的 `glm-4.6v`（该场景断言的是"视觉走同一条链"，不是某个具体型号）。
+
+### 复审后修正
+
+- **home 层的补丁现在真的会被读到**：`readProfilePatches()` 把 `<home>/cordis.patch.yml` 组在 profile 层**之后**，所以只读其中一个等于只看声明的一个子集。现在两层都读、按 Loader 的顺序合成——只在 home 层声明的路由会出现在面板里，而 home 层改了 `contextWindow` 的话是 home 层的值生效。缓存失效同时覆盖两层。
+- **补丁还不存在的 profile 不再去读别的 profile**：`profileContext.patchPath` 指向的补丁可能还没创建（没编辑过的 profile）。以前会退回 mtime 发现，把**未激活** profile 的声明混进当前配置——面板于是列出没人配过的路由，显式上限被一个猜出来的值替换。现在这种情况只读 home 层。
+
+### 复审后修正（第二轮）
+
+- **缓存真的命中了**：`settingsCache.paths.join()`（纯路径）和 `revision`（`path:mtime:size`）两种形状被直接比较，永远不相等——于是每次解析（包括设置面板背后每一次模型查询）都从磁盘重读并重解析所有补丁层。改为比较 `settingsCache.revision === revision`。
+- **读不到一层不再当作"什么都没声明"**：`readFileSync` 的 catch 是裸的，EACCES、EIO、EISDIR 都走了和"文件不存在"一样的 `continue`。而 `existingPatchLayers()` 已经把不存在的层滤掉了，走到这里说明文件存在但读不了——那是"有一层声明这个插件看不见"。现在任何读取失败都会让整份合成标记为不可读，不管有几层。
+- **合成失败时不再留下半份文档**：之前 `readable: false` 时合成的 `document` 仍被缓存并返回，而设置面板读 `settingsProviders()` 时不看这个标志，`buildOps()` 又会把整个 `providers.<route>.models` 数组写回去——半份文档会把已被取代的行当成"已存声明"展示，甚至可能被持久化。现在合成失败直接丢掉文档。
+- **"没编辑过的 profile" 那个场景不再被掩盖**：它的 home 层也声明了 `llm-pi-ai`，而 home 行会整段替换，把场景依赖的 `555555` 抹掉——于是即使发现逻辑错选了另一个 profile，测试照样过。home 层改为声明无关段，断言改为看插件自己的 `declared` 视图。
+- **"没有设置文档"的措辞不再误报**：单层读失败时（EACCES 等）之前也报 `no settings document`，现在只在真正 ENOENT/ENOTDIR 时报。
+
+### 复审后修正（第三轮）
+
+- **`insert:` 形式的行也能被读到**：这个包自己的 `cordis.patch.yml` 就是用 `- insert:` 加插件行的，而 `applyEntryPatches` 会把这些行推进目标组里。之前的循环只看外层 `id`，所以这么写的 `llm-pi-ai` 段完全看不见——路由从面板消失、补全会去覆盖看不见的声明。`sectionsFromPatches()` 和 `test-fallback.mjs` 现在都按 Loader 的顺序解析插入行。
+- **读不了的 profile 层不再被当成不存在**：`existsSync()` 对任何失败都返回 false，所以 profile 目录的权限问题和"从没编辑过的 profile"长得一样——层被当作"什么都没声明"丢掉，剩下的层照常生效，而运行中的适配器手里还握着这个插件已经看不见的声明。现在只有 ENOENT/ENOTDIR 才算"不在"，其余一律保留并让读取方报错、停掉补全。`settings.yaml` 那条旧路径也换成同一套判断。
+
+### 复审后修正（第四轮）
+
+- **发现路径上的权限失败也不再被吞掉**：上一轮只修了"服务告诉我是哪个 profile"那条路。没有 `profileContext` 的时候（命令行工具、无头运行），插件按 mtime 排候选层——而 `statSync` 的任何失败都被当成"这个 profile 没有补丁文件"丢掉，`readdirSync` 失败也被当成"没有 profiles"。于是权限坏掉的目录会静默消失，一个**更旧的** profile 或 home 层顶上来凑出一份看起来完整的文档，而运行中的适配器仍握着那些看不见的声明。现在发现路径里同样只把 ENOENT/ENOTDIR 当"不存在"，其余失败冒泡成"读不到"：补全整体停掉、文档不留半份，但不会从模型解析里抛出去（补全失败是降级，不是崩溃）。
+
 ## 0.3.0
 
 ### 修复

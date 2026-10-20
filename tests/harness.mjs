@@ -117,6 +117,10 @@ export function recordingLogger() {
 /**
  * The slice of a Cordis context a plugin needs to apply and hand back its
  * adapter, which is how every headless adapter suite drives the real seam.
+ *
+ * `fiber.entry.options.id` is the settings namespace 0.2.x reads off the owning
+ * fiber — the pi-ai adapter picks its route namespace from it, and a stub without
+ * one made `apply()` throw before registering anything.
  * @param logger - the logger the plugin should receive.
  * @returns `{ ctx, captured }`; `captured.adapter` is set once the adapter applies.
  */
@@ -129,6 +133,7 @@ export function cordisContext(logger = quietLogger()) {
 			get: () => undefined,
 			inject: noop,
 			logger,
+			fiber: { entry: { options: { id: "llm-pi-ai" } }, state: 2 },
 			llm: {
 				registerConfigurableProviders: () => ({ replace: noop }),
 				registerModelDiscovery: noop,
@@ -139,6 +144,22 @@ export function cordisContext(logger = quietLogger()) {
 			}
 		}
 	};
+}
+
+/**
+ * The resolved configuration section the pi-ai adapter's `apply()` takes.
+ *
+ * 0.2.x passes the adapter a schemastery instance and reads the routes through
+ * `config.providers.get()`, not a plain `{ providers }` object — so a suite that
+ * handed it the object directly failed inside the vendor's own code. The schema is
+ * the adapter's own export, so this resolves the same way DSH resolves a live
+ * settings section.
+ * @param adapterExports - the imported adapter module (`Config` is what is used).
+ * @param providers - routes, as a plain `{ route: profile }` mapping.
+ * @returns the value to pass to `apply()`.
+ */
+export function adapterConfig(adapterExports, providers) {
+	return adapterExports.Config({ providers });
 }
 
 /**

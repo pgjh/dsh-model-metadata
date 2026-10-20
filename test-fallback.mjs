@@ -29,18 +29,19 @@ import { sandbox } from "./tests/harness.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** Arguments that must be followed by a value. */
-const VALUED = ["--source", "--settings", "--plugin-settings", "--provider", "--plugin", "--node-modules", "--json-out"];
+const VALUED = ["--source", "--settings", "--plugin-settings", "--profile-patch", "--provider", "--plugin", "--node-modules", "--json-out"];
 
 function parseArgs(argv) {
-	const options = { source: undefined, settings: undefined, pluginSettings: undefined, provider: undefined, nodeModules: undefined, json: false, jsonOut: undefined, refresh: false };
+	const options = { source: undefined, settings: undefined, pluginSettings: undefined, pluginSettingsAuto: false, profilePatch: undefined, provider: undefined, nodeModules: undefined, json: false, jsonOut: undefined, refresh: false };
 	for (let at = 0; at < argv.length; at++) {
 		const arg = argv[at];
 		if (arg === "--help") {
-			console.log("node test-fallback.mjs [--source <adapter.js>] [--settings <settings.yaml>] [--plugin-settings <settings.yaml>] [--provider <route>] [--plugin <lib/index.mjs>] [--node-modules <dir>] [--json] [--json-out <file>] [--refresh]");
+			console.log("node test-fallback.mjs [--source <adapter.js>] [--settings <settings.yaml>] [--plugin-settings <settings.yaml>] [--plugin-settings-auto] [--profile-patch <cordis.patch.yml>] [--provider <route>] [--plugin <lib/index.mjs>] [--node-modules <dir>] [--json] [--json-out <file>] [--refresh]");
 			process.exit(0);
 		}
 		if (arg === "--json") options.json = true;
 		else if (arg === "--refresh") options.refresh = true;
+		else if (arg === "--plugin-settings-auto") options.pluginSettingsAuto = true;
 		else if (VALUED.includes(arg)) {
 			const value = argv[++at];
 			/* A flag whose value is missing must not fall back to a default: this tool
@@ -52,6 +53,7 @@ function parseArgs(argv) {
 			if (arg === "--source") options.source = value;
 			else if (arg === "--settings") options.settings = value;
 			else if (arg === "--plugin-settings") options.pluginSettings = value;
+			else if (arg === "--profile-patch") options.profilePatch = resolve(value.replace(/^~/, process.env.HOME ?? "~"));
 			else if (arg === "--provider") options.provider = value;
 			else if (arg === "--plugin") options.plugin = value;
 			else if (arg === "--node-modules") options.nodeModules = value;
@@ -101,7 +103,14 @@ if (options.settings !== undefined) process.env.DSH_PI_AI_SETTINGS_FILE = resolv
  * passes it gets no scratch document of its own.
  */
 if (options.pluginSettings !== undefined) process.env.DSH_PI_AI_SETTINGS_FILE = resolve(options.pluginSettings.replace(/^~/, process.env.HOME ?? "~"));
-else if (options.settings === undefined) {
+/*
+ * `--plugin-settings-auto` hands the plugin nothing at all, so it has to find the
+ * declarations the way it does in a real host process. That is the only way to
+ * test the discovery path: every other option names the file, which is exactly the
+ * thing under test.
+ */
+if (options.pluginSettingsAuto === true) delete process.env.DSH_PI_AI_SETTINGS_FILE;
+else if (options.pluginSettings === undefined && options.settings === undefined) {
 	/*
 	 * The plugin refuses to fill anything in when it cannot read the declarations it
 	 * is supposed to respect (that is its fail-closed rule), so a run with no
@@ -146,7 +155,7 @@ function loadProviders() {
 					{ id: "probe/kimi-k3", name: "probe/kimi-k3" },
 					{ id: "miclprobe/mimo-v2.5", name: "miclprobe/mimo-v2.5" },
 					{ id: "probe/minimax-m3", name: "probe/minimax-m3" },
-					{ id: "probe/glm-5v-turbo", name: "probe/glm-5v-turbo" },
+					{ id: "probe/glm-4.6v", name: "probe/glm-4.6v" },
 					/* the official deepseek route's V41 flash, in its three spellings */
 					{ id: "probe/deepseek-v4.1-flash", name: "probe/deepseek-v4.1-flash" },
 					{ id: "probe/deepseek-v41-flash", name: "probe/deepseek-v41-flash" },
@@ -170,8 +179,23 @@ function loadProviders() {
 	}
 	const require = createRequire(join(NODE_MODULES, "noop.js"));
 	const yaml = require("js-yaml");
-	const document = yaml.load(readFileSync(resolve(options.settings.replace(/^~/, process.env.HOME ?? "~")), "utf8"));
-	const section = document["llm-pi-ai"];
+	const parsed = yaml.load(readFileSync(resolve(options.settings.replace(/^~/, process.env.HOME ?? "~")), "utf8"));
+	/*
+	 * Either shape a DSH home can carry: a 0.1.x settings document
+	 * (`llm-pi-ai: { providers: … }`) or a 0.2.x profile patch layer (a list of
+	 * `{ id, config }` entries, with `insert:` rows among them). The adapter only
+	 * ever wants the section.
+	 */
+	/*
+	 * Read it the way the plugin does, so this tool accepts exactly the patches the
+	 * plugin accepts. A config-less row is a marker, not a declaration, and is
+	 * skipped by both; an `insert:` row declares its entries, so it has to be
+	 * searched too.
+	 */
+	const section = Array.isArray(parsed)
+		? [...parsed.flatMap((patch) => patch?.insert ?? []), ...parsed]
+				.findLast((row) => row?.id === "llm-pi-ai" && row.config !== undefined)?.config
+		: parsed["llm-pi-ai"];
 	if (section === undefined || typeof section.providers !== "object") {
 		console.error("that settings file has no llm-pi-ai.providers section");
 		process.exit(1);
@@ -180,13 +204,29 @@ function loadProviders() {
 }
 
 /** A Cordis context stub: enough for `apply()` to build and hand us the adapter. */
-function fakeContext() {
+function fakeContext(options = {}) {
 	const captured = {};
 	const noop = () => {};
 	const logged = (level) => (...args) => process.stderr.write(`[${level}] ${args.map((value) => String(value)).join(" ")}\n`);
+	/*
+	 * `profilePatch` stands in for the launcher's `profileContext` service, which is
+	 * the only thing that tells a plugin which profile is running. Passing a path
+	 * whose file does not exist is how the "profile has never been edited" case is
+	 * reached — the service is there, its patch simply is not.
+	 */
+	const profileContext = options.profilePatch === undefined ? undefined : { name: "test", patchPath: options.profilePatch };
 	const ctx = {
-		get: () => undefined,
+		get: (name) => (name === "profileContext" ? profileContext : undefined),
 		inject: noop,
+		/*
+		 * 0.2.x reads the settings namespace off the owning fiber
+		 * (`ctx.fiber.entry.options.id`), so a stub without one throws before the
+		 * adapter is registered. The id is the entry this plugin keys the panel and
+		 * its writes to.
+		 */
+		fiber: { entry: { options: { id: "llm-pi-ai" } }, state: 2 },
+		/* 0.2.x subscribes to its own config changes through the fiber. */
+		on: () => () => {},
 		logger: { debug: logged("debug"), info: logged("plugin"), warn: logged("warn"), error: logged("error") },
 		llm: {
 			registerConfigurableProviders: () => ({ replace: noop }),
@@ -208,15 +248,24 @@ function fakeContext() {
  * path used by the source-patch runs.
  */
 const adapterPath = options.plugin === undefined ? mirrorFor(SOURCE) : SOURCE;
-const { apply } = await import(pathToFileURL(adapterPath).href);
+const adapterModule = await import(pathToFileURL(adapterPath).href);
+const { apply } = adapterModule;
 const providers = loadProviders();
-const { ctx, captured } = fakeContext();
+const { ctx, captured } = fakeContext({ profilePatch: options.profilePatch });
+/* Hoisted: the row builder asks this module for its view of the declarations. */
+let plugin;
 if (options.plugin !== undefined) {
-	const plugin = await import(pathToFileURL(options.plugin).href);
+	plugin = await import(pathToFileURL(options.plugin).href);
 	plugin.apply(ctx);
 	console.log(`plugin: ${options.plugin} -> ${plugin.name ?? "(unnamed)"}`);
 }
-apply(ctx, providers);
+/*
+ * 0.2.x hands the adapter a schemastery section and reads routes through
+ * `config.providers.get()`; 0.1.x took the plain object. Resolving through the
+ * adapter's own `Config` export works for both, so one path drives either DSH.
+ */
+const config = adapterModule.Config === undefined ? providers : adapterModule.Config(providers);
+apply(ctx, config);
 const adapter = captured.adapter;
 if (adapter === undefined) {
 	console.error("apply() registered no adapter — nothing to test");
@@ -233,6 +282,9 @@ for (const [provider, profile] of Object.entries(providers.providers)) {
 		rows.push({
 			provider,
 			id,
+			/* The plugin's own view of the declarations, which can differ from what the
+			 * adapter was fed — see the "unedited profile" scenario in verify.mjs. */
+			declared: declaredView(provider, id),
 			contextWindow: model?.contextWindow,
 			maxTokens: model?.maxTokens,
 			input: model?.input,
@@ -243,6 +295,25 @@ for (const [provider, profile] of Object.entries(providers.providers)) {
 			reasoning: info?.reasoning === undefined ? [] : info.reasoning.efforts.map((effort) => effort.id)
 		});
 	}
+}
+
+/**
+ * What the plugin considers declared for one model, read through the plugin's own
+ * resolution rather than reimplemented here.
+ *
+ * The plugin decides this from files it discovers itself, which is the behaviour
+ * under test in the "unedited profile" scenario, so reading it back is the only way
+ * to tell "it found no declaration" from "the adapter was handed this value".
+ * `settingsDocumentForTest` is a diagnostic seam the plugin exports for this.
+ * @param provider - the route.
+ * @param id - the model id.
+ * @returns the declared entry, or undefined.
+ */
+function declaredView(provider, id) {
+	/* No `--plugin` means no plugin to ask; the column is simply absent. */
+	if (plugin?.settingsDocumentForTest === undefined) return undefined;
+	const document = plugin.settingsDocumentForTest();
+	return document?.[plugin.settingsNamespaceForTest?.() ?? "llm-pi-ai"]?.providers?.[provider]?.models?.find((entry) => entry?.id === id);
 }
 
 if (options.jsonOut !== undefined) {

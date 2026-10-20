@@ -25,8 +25,8 @@ llm-pi-ai:
             high: high
         # explicit "text only": the installed catalog knows this name as image-capable,
         # and a declaration on the row must win over that
-        - id: probe/glm-5v-turbo
-          name: probe/glm-5v-turbo
+        - id: probe/glm-4.6v
+          name: probe/glm-4.6v
           input:
             - text
         # matches the official deepseek catalog under the relaxed spelling:
