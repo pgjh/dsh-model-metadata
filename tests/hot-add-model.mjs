@@ -33,7 +33,7 @@ writeFileSync(process.env.DSH_PI_AI_CATALOG_SNAPSHOT, JSON.stringify({ fetchedAt
 process.env.DSH_PI_AI_CATALOG_REFRESH = "0";
 
 const plugin = await import(pathToFileURL(PLUGIN).href);
-const { apply } = await import(pathToFileURL(adapterEntry()).href);
+const { apply, Config } = await import(pathToFileURL(adapterEntry()).href);
 
 const noop = () => {};
 const quiet = quietLogger();
@@ -41,6 +41,9 @@ const captured = {};
 const ctx = {
 	get: () => undefined,
 	inject: noop,
+	on: noop,
+	/* The adapter reads its settings namespace off the plugin fiber. */
+	fiber: { entry: { options: { id: "llm-pi-ai" } } },
 	logger: quiet,
 	llm: {
 		registerConfigurableProviders: () => ({ replace: noop }),
@@ -67,11 +70,11 @@ const providersA = { providers: { probe: route([
 const providersB = { providers: { probe: route([
 	{ id: "probe/glm-5.3", name: "probe/glm-5.3" },
 	{ id: "probe/deepseek-v41-flash", name: "probe/deepseek-v41-flash" },
-	{ id: "probe/DeepSeek-V4-Flash-Vision", name: "probe/DeepSeek-V4-Flash-Vision" }
+	{ id: "probe/DeepSeek-V4-Pro", name: "probe/DeepSeek-V4-Pro" }
 ]) } };
 
 plugin.apply(ctx);
-apply(ctx, providersA);
+apply(ctx, typeof Config === "function" ? Config(providersA) : providersA);
 const adapter = captured.adapter;
 
 const show = async (label, id) => {
@@ -91,18 +94,18 @@ await show("start ", "probe/glm-5.3");
  * profiles source starts answering with the new configuration. Same instance,
  * same prototype wrap, same running process.
  */
-apply(ctx, providersB);
+apply(ctx, typeof Config === "function" ? Config(providersB) : providersB);
 adapter.config.profiles = captured.adapter.config.profiles;
 
 console.log("=== after the settings change, same process (config B) ===");
 const added1 = await show("added ", "probe/deepseek-v41-flash");
-const added2 = await show("added ", "probe/DeepSeek-V4-Flash-Vision");
+const added2 = await show("added ", "probe/DeepSeek-V4-Pro");
 const kept = await show("kept  ", "probe/glm-5.3");
 
 const { expect, finish } = suite("hot add");
 expect("a model added at runtime is enriched without a restart", added1.contextWindow, 1000000);
 expect("its reasoning levels arrive with it", added1.efforts?.join("/"), "off/low/high/max");
-expect("a second added model (the -exp spelling) is enriched too", added2.contextWindow, 1000000);
+expect("a second added model (the official catalog's display name) is enriched too", added2.contextWindow, 1000000);
 expect("and carries the official route's levels", added2.efforts?.join("/"), "off/low/high/max");
 expect("a model that was already there keeps its metadata", kept.contextWindow, 1000000);
 WORK.clean();

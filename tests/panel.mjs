@@ -208,6 +208,15 @@ expect("the bundle registers itself under the package's own name", [registration
 	expect("cells: both pickers are DSH's Menu", nodes.filter(isMenu).length, 2);
 	expect("cells: the menu escapes the card's scroll container", nodes.filter(isMenu).every((node) => node.props.portal === true), true);
 	expect("cells: a picker announces that it opens a menu, and whether it is open", (() => { const trigger = nodes.filter(isMenu)[0].props.anchor.props; return [trigger["aria-haspopup"], trigger["aria-expanded"]]; })(), ["menu", false]);
+	/* DSH 0.2.1 exports IconChevronDownOutlineRegular instead of the old
+	 * IconChevronDownOutline14; reading only the old name left the type undefined and
+	 * every row fell into its error boundary ("此行的元数据控件加载失败"). */
+	const caretCount = (node) => {
+		let count = 0;
+		for (const element of walkElements(node)) if (element?.type?.isChevron === true) count++;
+		return count;
+	};
+	expect("cells: each picker draws exactly one DSH caret", nodes.filter(isMenu).map((node) => caretCount(node.props.anchor)), [1, 1]);
 	expect("cells: the row's status line is a live region a screen reader will read", (() => { const note = nodes.find((node) => node.type === "p"); return [note.props.role, note.props["aria-live"], note.props.tabIndex]; })(), ["status", "polite", -1]);
 	const levelMenu = nodes.find((node) => isMenu(node) && node.props.items.some((item) => item.id === client.CUSTOM));
 	expect("cells: the level menu carries the presets, a separator and 自定义…", [levelMenu.props.items.length, levelMenu.props.items.at(-1), levelMenu.props.items.at(-2).type], [client.LEVEL_PRESETS.length + 2, { id: client.CUSTOM, label: "自定义…" }, "separator"]);

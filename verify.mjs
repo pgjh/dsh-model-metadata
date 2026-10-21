@@ -302,17 +302,17 @@ try {
  * settings available, because claiming image support an endpoint lacks fails a
  * turn instead of refusing the attachment.
  */
-expect("input: the chain decides images by default", rowOf(plugin, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
-expect("input: and that catalog row is not text-only, or this scenario would prove nothing", catalogInput("zai-coding-cn", "glm-5v-turbo").includes("image"), true);
+expect("input: the chain decides images by default", rowOf(plugin, "probe/glm-5v-turbo").input, catalogInput("openrouter", "z-ai/glm-5v-turbo"));
+expect("input: and that catalog row is not text-only, or this scenario would prove nothing", catalogInput("openrouter", "z-ai/glm-5v-turbo").includes("image"), true);
 expect("input: a text-only upstream keeps the model text-only", rowOf(plugin, "probe/glm-5.3").input, catalogInput("zai", "glm-5.3"));
 expect("input: the official route's own vision model declares image", rowOf(plugin, "probe/deepseek-v41-flash").input, officialInput("deepseek-flash"));
 const noInput = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "off" });
 expect("input=off: no modality is filled in", rowOf(noInput, "probe/glm-5v-turbo").input, ["text"]);
 const withInput = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "on" });
-expect("input=on: a vision model declares image", rowOf(withInput, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("input=on: a vision model declares image", rowOf(withInput, "probe/glm-5v-turbo").input, catalogInput("openrouter", "z-ai/glm-5v-turbo"));
 expect("input=on: a models.dev-only claim is honoured too", rowOf(withInput, "probe/zephyr-9-pro").input, ["text", "image"]);
 const bundledOnly = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "bundled" });
-expect("input=bundled: the shipped catalog's claim still applies", rowOf(bundledOnly, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("input=bundled: the shipped catalog's claim still applies", rowOf(bundledOnly, "probe/glm-5v-turbo").input, catalogInput("openrouter", "z-ai/glm-5v-turbo"));
 expect("input=bundled: the official deepseek catalog counts as shipped", rowOf(bundledOnly, "probe/deepseek-v41-flash").input, officialInput("deepseek-flash"));
 expect("input=bundled: a models.dev-only claim is ignored", rowOf(bundledOnly, "probe/zephyr-9-pro").input, ["text"]);
 
@@ -344,7 +344,7 @@ expect("fallback=context: capacities are still filled in", rowOf(contextOnly, "p
  * be able to see which half is off here.
  */
 expect("fallback=context: and reasoning is left to the seam", rowOf(contextOnly, "probe/glm-5.3").reasoning, []);
-expect("fallback=context: while image support still rides the chain", rowOf(contextOnly, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("fallback=context: while image support still rides the chain", rowOf(contextOnly, "probe/glm-5v-turbo").input, catalogInput("openrouter", "z-ai/glm-5v-turbo"));
 /*
  * Reasoning levels are chosen the same way input modalities are, and for the same
  * reason: a bare `reasoning: true` from a mirror becomes five offered levels, which
@@ -454,6 +454,7 @@ function suite(label, script, env = {}) {
 
 suite("hot snapshot", "tests/hot-snapshot.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });
 suite("hot add", "tests/hot-add-model.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });
+suite("settings service", "tests/settings-service.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });
 suite("refresh policy (default)", "tests/refresh-policy.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN, DSH_PI_AI_CATALOG_REFRESH: "24" });
 suite("refresh policy (disabled)", "tests/refresh-policy.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN, DSH_PI_AI_CATALOG_REFRESH: "0" });
 suite("settings panel", "tests/panel.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });

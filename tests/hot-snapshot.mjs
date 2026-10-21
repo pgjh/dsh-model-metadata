@@ -46,9 +46,18 @@ const providers = { providers: { probe: { displayName: "probe", api: "openai-res
 const captured = {};
 const { logger: quiet, warnings } = recordingLogger();
 const plugin = await import(pathToFileURL(PLUGIN).href);
-const { apply } = await import(pathToFileURL(ADAPTER).href);
-plugin.apply({ get: () => undefined, inject: () => {}, logger: quiet });
-apply({ get: () => undefined, inject: () => {}, logger: quiet, llm: { registerConfigurableProviders: () => ({ replace: () => {} }), registerModelDiscovery: () => {}, registerAdapter: (_routes, adapter) => { captured.adapter = adapter; return { replace: () => {} }; } } }, providers);
+const { apply, Config } = await import(pathToFileURL(ADAPTER).href);
+const ctx = {
+	get: () => undefined,
+	inject: () => {},
+	on: () => {},
+	/* The adapter reads its settings namespace off the plugin fiber. */
+	fiber: { entry: { options: { id: "llm-pi-ai" } } },
+	logger: quiet,
+	llm: { registerConfigurableProviders: () => ({ replace: () => {} }), registerModelDiscovery: () => {}, registerAdapter: (_routes, adapter) => { captured.adapter = adapter; return { replace: () => {} }; } }
+};
+plugin.apply(ctx);
+apply(ctx, typeof Config === "function" ? Config(providers) : providers);
 const adapter = captured.adapter;
 const infoOf = (id) => adapter.resolveModel("probe", id);
 const contextOf = async (id) => (await infoOf(id)).context?.contextWindow;

@@ -187,6 +187,12 @@ function fakeContext() {
 	const ctx = {
 		get: () => undefined,
 		inject: noop,
+		on: noop,
+		/*
+		 * The adapter reads its settings namespace off the plugin fiber. A real
+		 * DSH provides it; this stub has to name the same entry the fixture models.
+		 */
+		fiber: { entry: { options: { id: "llm-pi-ai" } } },
 		logger: { debug: logged("debug"), info: logged("plugin"), warn: logged("warn"), error: logged("error") },
 		llm: {
 			registerConfigurableProviders: () => ({ replace: noop }),
@@ -208,7 +214,7 @@ function fakeContext() {
  * path used by the source-patch runs.
  */
 const adapterPath = options.plugin === undefined ? mirrorFor(SOURCE) : SOURCE;
-const { apply } = await import(pathToFileURL(adapterPath).href);
+const { apply, Config } = await import(pathToFileURL(adapterPath).href);
 const providers = loadProviders();
 const { ctx, captured } = fakeContext();
 if (options.plugin !== undefined) {
@@ -216,7 +222,12 @@ if (options.plugin !== undefined) {
 	plugin.apply(ctx);
 	console.log(`plugin: ${options.plugin} -> ${plugin.name ?? "(unnamed)"}`);
 }
-apply(ctx, providers);
+/*
+ * The adapter expects the resolved plugin config (its schema fields expose
+ * `.get()`), not the raw providers section. `Config(value)` is the same
+ * schemastery call DSH's loader makes.
+ */
+apply(ctx, typeof Config === "function" ? Config(providers) : providers);
 const adapter = captured.adapter;
 if (adapter === undefined) {
 	console.error("apply() registered no adapter — nothing to test");

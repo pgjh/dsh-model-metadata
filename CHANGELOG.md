@@ -2,6 +2,15 @@
 
 这里记的是**用户能看到的变化**，倒序排列。历史更细的改动见 git 提交记录。
 
+## 0.3.1
+
+### 修复
+
+- **DSH 0.2.1 起插件不再"装上但什么都不补"**：DSH 0.2.1 把设置文档从 `$DSH_HOME/settings.yaml` 移进了当前 profile 的配置，并把它自己的旧文件改名成 `settings.yaml.imported`。插件仍按旧路径找文件，找不到就按"读不到声明"的规则**完全关闭补全**，界面卡片也只剩空列表。现在声明优先从 DSH 的 `settings` 服务读取（`user` 层，也就是这个 profile 的覆盖值），`DSH_PI_AI_SETTINGS_FILE` 仍然可以强制指定一个 YAML 文档；更早的 DSH 版本继续读 `settings.yaml`。
+- **界面每行不再报"此行的元数据控件加载失败"**：DSH 0.2.1 把 `@deepseek-ai/dsh-client-ui-primitives` 的下拉箭头从 `IconChevronDownOutline14` 改名为 `IconChevronDownOutlineRegular`。插件只读旧名字，组件变成 `undefined`，React 的 "element type is invalid" 被每一行自己的错误边界接住，于是每行都显示那句失败提示。现在两个名字都认，都没有时干脆不画箭头而不是渲染一个非法元素。
+- **回归测试**：新增 `tests/settings-service.mjs`，在没有设置文件、只有 `settings` 服务的情况下断言"声明仍优先、未声明的字段照借、面板列出配置的路由"；`hot-snapshot` / `hot-add-model` 的适配器替身补上 0.2.1 新增的 `fiber` / `on` 与 `Config(...)` 包装；React 替身的 `createElement` 现在和 React 一样拒绝 `undefined` 组件类型，面板套件会明确断言每个选择器恰好一个 DSH 箭头。
+- **目录期望值随 0.2.1 更新**：`zai-coding-cn/glm-5v-turbo` 已不在自带目录里，视觉用例改用 `openrouter` 的对应行；hot-add 的第二个模型改用仍在官方目录里的 `DeepSeek-V4-Pro`。
+
 ## 0.3.0
 
 ### 修复

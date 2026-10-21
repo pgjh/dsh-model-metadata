@@ -17,7 +17,7 @@
 
 ## 这是怎么回事
 
-接自定义网关时，`settings.yaml` 里一般只写 id：
+接自定义网关时，设置里一般只写 id（DSH 0.2.1 起存在当前 profile 的配置里，旧版本是 `settings.yaml`）：
 
 ```yaml
 llm-pi-ai:
@@ -43,7 +43,7 @@ llm-pi-ai:
 ## 插件做的事
 
 1. **按模型名查**：取 id 里最后一个 `/` 后面的名字（`my-gateway/gpt-4o` → `gpt-4o`），按"官方路由 → 内置目录 → opencode → models.dev"的顺序查（详见下面「哪些名字认得出」），查到之后，就把这个模型该有的上下文长度、输出上限、推理等级、图片支持补上去。名字的写法差一点也没关系：`deepseek-v41-flash`、`deepseek-v4.1-flash`、"DeepSeek-V41-Flash" 算同一个名字，显示名和 `-exp` 之类的后缀也能对上。
-2. **只补缺的**：你在 `settings.yaml` 里亲手写过的字段，它不动。反过来，**它读不到这份文档时也绝不猜**——文件不在它找的位置、机器上没有 YAML 解析器、或者你正编辑到一半 YAML 语法坏了，它都会**完全不补**，并在日志里说明原因（`enrichment off (…)`）：这时候"你有没有声明"是它看不见的事实，而"借用"会把你亲手钉住的 64K 覆盖成目录里的 272K。
+2. **只补缺的**：你在设置里亲手写过的字段，它不动。反过来，**它读不到这些声明时也绝不猜**，并在日志里说明原因（`enrichment off (…)`）：这时候"你有没有声明"是它看不见的事实，而"借用"会把你亲手钉住的 64K 覆盖成目录里的 272K。声明从哪来跟 DSH 版本走：0.2.1 起是当前 profile 的配置（通过 DSH 的 `settings` 服务读取，`settings.yaml` 已被 DSH 自己改名成 `settings.yaml.imported`）；更早的版本读 `$DSH_HOME/settings.yaml`。旧文件不存在、没有 YAML 解析器、或者你正编辑到一半 YAML 语法坏了，都算"读不到"。
 3. **界面上给你两个开关**：推理等级、视觉。DSH 官方界面没有这两个控件，这里是唯一的图形入口；改完点「写入」固定下来，不点就一直跟着目录走。写入是**按行**的：双击只写一次，也不会把别的行还没写入的改动丢掉；只读的部署会直接说明写不了。这两个控件和结论行跟随设置页的语言（简体中文 / English）。
 4. **目录数据自己更新**：启动、打开界面、以及按天（每小时检查一次是否过期）各更新一次 models.dev，所以新模型不用你手动管；数据没变时只确认一次，不重新下载。
 
@@ -75,7 +75,7 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 
 每个模型行里（名称下面、"容量"上面）会多出两行：
 
-- **推理等级**：菜单里挑一个（跟随自动匹配 / 关闭推理 / 低·中·高 / 自定义…）。选「自定义…」可以填 `low, high, max`，写法和 `settings.yaml` 里一样。
+- **推理等级**：菜单里挑一个（跟随自动匹配 / 关闭推理 / 低·中·高 / 自定义…）。选「自定义…」可以填 `low, high, max`，写法和设置里一样。
 - **视觉**：跟随自动匹配 / 开启（能看图）/ 关闭（只收文字）。
 - 下面那行是**结论**，告诉你查到了什么：
 
@@ -122,7 +122,7 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 | `DSH_PI_AI_CATALOG_PANEL` | `on` | `off` = 根本不注册界面数据路由（补全本身不受影响，只是编辑器里不会出现那两行控件，也不会显示任何报错）。注意它同时会关掉「数据超过 6 小时、打开界面时更新」这个时机——那个时机就是这条路由被请求时触发的 |
 | `DSH_PI_AI_CATALOG_PANEL_HOSTS` | 不设 = 任何 Host | 逗号分隔的 Host 白名单：只回应列出来的 Host，不在其中的一律拒绝；反代后面用 |
 | `DSH_CATALOG_FALLBACK_NODE_MODULES` | 不设 | 额外的一个 `node_modules` 根目录：找不到 DSH 的包时从这里找 |
-| `DSH_PI_AI_SETTINGS_FILE` | `$DSH_HOME/settings.yaml` | 读哪个设置文档（判断哪些字段是你自己声明的） |
+| `DSH_PI_AI_SETTINGS_FILE` | 不设 = 跟 DSH 走（0.2.1+ 读 `settings` 服务；更早读 `$DSH_HOME/settings.yaml`） | 强制从某个 YAML 文档读声明（判断哪些字段是你自己声明的）；设了就一定读它，不再问 DSH |
 
 `DSH_PI_AI_CATALOG_FALLBACK_LEVELS` 是为什么存在的：镜像站对某些模型只给一个"会推理"的裸标记、没有等级细节，把它当作"低/中/高都行"可能给端点送去它当场就拒绝的等级——和图片那个开关防的是同一类过度声明。设成 `bundled` 时，自带目录（它们本来就带等级映射）说了算，models.dev 只用来补容量。
 
@@ -152,7 +152,7 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 
 ## 常见问题
 
-**会不会改我的配置？** 不会。你不点「写入」，它一个字节都不写 `settings.yaml`；点了也只写那一行的推理等级和视觉：写之前会重读一次当前配置，别的行的内容、以及别的行你还没写入的改动都不会被顺手带走。
+**会不会改我的配置？** 不会。你不点「写入」，它一个字节都不写你的配置；点了也只写那一行的推理等级和视觉：写之前会重读一次当前配置，别的行的内容、以及别的行你还没写入的改动都不会被顺手带走。
 
 **界面文字是中文还是英文？** 跟随设置页：设置页切到 English，这两个控件和结论行就是英文，其它语言回落到简体中文。
 
@@ -202,8 +202,9 @@ npm run test:unit        # 不需要 DSH 安装：unit + install-plugin + refres
 | ✔ `tests/panel.mjs` | DSH 的包，**不需要**起服务器 | 面板数据；浏览器半边能否按 DSH 的模块形状加载、和宿主半边是否一致 |
 | ✔ `tests/hot-snapshot.mjs` | 同上 | 目录数据换了以后，同一个进程里下次解析就用新数据 |
 | ✔ `tests/hot-add-model.mjs` | 同上 | 运行中新增的模型也会被补全 |
+| ✔ `tests/settings-service.mjs` | 同上 | DSH 0.2.1 起从 `settings` 服务读声明：声明仍优先、界面数据不为空 |
 | `tests/browser-check.mjs` | 跑着的 dsh + Chromium | 真浏览器里验收界面 |
-| `tests/fusion-write.mjs` | 跑着的 dsh + Chromium | 真点一次「写入」，跑完把 settings.yaml 还原 |
+| `tests/fusion-write.mjs` | 跑着的 dsh + Chromium | 真点一次「写入」，跑完把配置还原 |
 | `tests/new-route.mjs` | 跑着的 dsh + Chromium | 临时加一个网关，验证"新网关自动匹配"，跑完还原 |
 | `tests/live-refresh.mjs` | 联网（约 5 MB） | 真去 models.dev 拉一次，验证自动更新 |
 | `tests/harness.mjs` | — | 不是套件：上面各套件共用的脚手架（断言、临时目录、Cordis 上下文替身） |

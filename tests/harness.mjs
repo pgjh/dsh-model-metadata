@@ -128,6 +128,9 @@ export function cordisContext(logger = quietLogger()) {
 		ctx: {
 			get: () => undefined,
 			inject: noop,
+			on: noop,
+			/* The adapter reads its settings namespace off the plugin fiber. */
+			fiber: { entry: { options: { id: "llm-pi-ai" } } },
 			logger,
 			llm: {
 				registerConfigurableProviders: () => ({ replace: noop }),
@@ -170,7 +173,9 @@ export async function loadBundle(bundlePath) {
 		if (specifier === "@deepseek-ai/dsh-client-ui-primitives") {
 			return {
 				Menu: (props) => ({ type: "menu", props }),
-				IconChevronDownOutline14: (props) => ({ type: "chevron", props })
+				/* DSH 0.2.1 renamed the icon; the bundle reads whichever exists. The tag
+				 * lets a suite tell this component apart after the shim's createElement. */
+				IconChevronDownOutlineRegular: Object.assign((props) => ({ type: "chevron", props }), { isChevron: true })
 			};
 		}
 		throw new Error(`the client bundle required unexpected module "${specifier}"`);
@@ -188,7 +193,13 @@ export async function loadBundle(bundlePath) {
  */
 export const reactShim = {
 	Fragment: Symbol.for("react.fragment"),
-	createElement: (type, props, ...children) => ({ type, props, children }),
+	createElement: (type, props, ...children) => {
+		/* React throws for an undefined component type; a stub that quietly made an
+		 * element instead let a bundle call a component DSH no longer exports, which
+		 * the browser reported as "this row failed to load" and the suite could not see. */
+		if (type === undefined || type === null) throw new TypeError("Element type is invalid: expected a component but got undefined");
+		return { type, props, children };
+	},
 	useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
 	useRef: (initial) => ({ current: initial }),
 	useEffect: () => {},

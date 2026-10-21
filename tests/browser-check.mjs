@@ -34,7 +34,13 @@ const session = await openPage(url, {
 });
 const { send, evaluate, click, logs } = session;
 
-const clickedSettings = await click("设置");
+/* 0.2.1 moved Settings behind the sidebar's 更多 disclosure; older builds show it
+ * directly. Try the visible entry first, then the disclosure. */
+let clickedSettings = await click("设置");
+if (!clickedSettings && (await click("更多"))) {
+	await sleep(500);
+	clickedSettings = await click("设置");
+}
 await sleep(1500);
 const clickedModels = await click("模型");
 await sleep(2500);
@@ -150,21 +156,21 @@ const fusion = await evaluate(`(async () => {
 		popup: await (async () => {
 			const trigger = first?.querySelector("button[aria-haspopup='menu']");
 			if (trigger === undefined) return undefined;
+			const visible = (node) => node.offsetParent !== null;
+			/* DSH's Menu does not use an ARIA menu role on its surface, and the popup is
+			 * portaled out of the card, so the honest probe is "which buttons appeared
+			 * after the click". Comparing before/after also excludes the page's own. */
+			const before = new Set([...document.querySelectorAll("button")].map((node) => node.textContent.trim()));
 			trigger.click();
 			await new Promise((resolve) => setTimeout(resolve, 500));
-			const lists = [...card.querySelectorAll("[role='menu'], [role='listbox'], ul")].filter((node) => node.offsetParent !== null);
-			const list = lists.at(-1);
-			const items = list === undefined ? [] : [...list.querySelectorAll("li, [role='menuitem'], [role='menuitemradio']")];
-			const style = list === undefined ? undefined : getComputedStyle(list);
+			const appeared = [...document.querySelectorAll("button")]
+				.filter((node) => visible(node) && !before.has(node.textContent.trim()))
+				.map((node) => node.textContent.trim())
+				.filter((text) => text.length > 0);
 			const shot = {
 				triggerText: trigger.textContent.trim(),
-				lists: lists.length,
-				items: items.length,
-				itemTexts: items.slice(0, 8).map((node) => node.textContent.trim()),
-				background: style?.backgroundColor,
-				radius: style?.borderRadius,
-				zIndex: style?.zIndex,
-				insideCard: list === undefined ? undefined : card.contains(list)
+				items: appeared.length,
+				itemTexts: appeared.slice(0, 8)
 			};
 			document.body.click();
 			return shot;
