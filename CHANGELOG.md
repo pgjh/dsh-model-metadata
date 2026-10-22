@@ -2,6 +2,13 @@
 
 这里记的是**用户能看到的变化**，倒序排列。历史更细的改动见 git 提交记录。
 
+## 0.3.2
+
+### 修复
+
+- **桌面版能读到设置卡片的数据了**：DeepSeek Harness Desktop 的页面 origin 是 `dsh-app://app`，而 Host 监听的是 `127.0.0.1:<随机端口>`。有的桌面版转发请求时会保留 `Origin`（或把它标成 cross-site），插件原来的同源检查因此回 403，设置卡片只剩「读取匹配结果失败」。现在 `dsh-app://app` 在 loopback Host 上按同源处理；公网 Host 上的这个 origin 仍然拒绝，`DSH_PI_AI_CATALOG_PANEL_HOSTS` 对公网 Host 也仍然照旧。
+- **文档不再让桌面版用户装错 profile**：安装/更新/卸载都补上了 `--profile desktop` 的命令和顺序（先完全退出桌面版，用应用菜单装出来的 `dsh` 操作，再打开）。桌面版不读 `web` profile 的插件，只按旧文档安装会在桌面版里完全没有控件。
+
 ## 0.3.1
 
 ### 修复

@@ -55,15 +55,18 @@ llm-pi-ai:
 corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 ```
 
-然后三种方式**选一种**（`web` 是 profile 名，一般不用改）：
+然后三种方式**选一种**（`web` 是浏览器版的 profile 名；桌面版换成 `desktop`）：
 
 | 方式 | 命令 |
 |---|---|
 | npm 包（推荐） | `dsh plugin --profile web add dsh-model-metadata` |
 | GitHub 仓库 | `dsh plugin --profile web add github:pgjh/dsh-model-metadata` |
 | 本地源码 | `dsh plugin --profile web add /path/to/checkout` |
+| 桌面版（npm / GitHub / 本地源码同上，只改 profile） | `dsh plugin --profile desktop add …` |
 
 命令会把包装好，并自动挂进 DSH 的插件列表，不用你手改配置文件。装完**重启一次**（用你启动 dsh 的方式：直接跑 `dsh web` 的就重跑一遍；交给 systemd 的就 `systemctl --user restart <你的服务名>`；Docker 里就重启容器）。
+
+> **桌面版（DeepSeek Harness Desktop）是另一个 profile。** 它不读 `web` profile 的插件，所以只按上面的 `--profile web` 装，浏览器里有控件、桌面版没有——这不是插件没生效，而是装错了地方。桌面版的 profile 叫 `desktop`，由 Electron 应用独占：先用应用菜单里的 **Manage dsh Command…** 装好它自带的 `dsh` 命令，**完全退出**桌面版，再执行 `dsh plugin --profile desktop add dsh-model-metadata`（更新时把 `add` 换成 `update`），然后重新打开桌面版。用 npm 全局安装的 `dsh` 改不了这个 profile；必须用桌面版装出来的那条命令。
 
 之后记住这条界线：**界面上的改动刷新页面就行，逻辑上的改动要重启**。
 
@@ -132,8 +135,9 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 
 | 装法 | 命令 |
 |---|---|
-| npm / GitHub | `dsh plugin --profile web update dsh-model-metadata` |
-| 本地复制 | `node install-plugin.mjs --update`（等同 `--apply`：重新拷一份文件、把插件行补上；跑完会告诉你只需刷新页面还是必须重启 dsh） |
+| npm / GitHub（浏览器版） | `dsh plugin --profile web update dsh-model-metadata` |
+| npm / GitHub（桌面版） | 退出桌面版，用应用菜单装出来的 `dsh` 执行 `dsh plugin --profile desktop update dsh-model-metadata`，再打开桌面版 |
+| 本地复制 | `node install-plugin.mjs --update`（等同 `--apply`：重新拷一份文件、把插件行补上；跑完会告诉你只需刷新页面还是必须重启 dsh）；桌面版要加 `--profile desktop`，并先退出桌面版 |
 
 两种更新都只替换**插件目录**：目录数据（`$DSH_HOME/models-dev-snapshot.json`）在 DSH home 里，更新插件不会碰它，也不用重新下载。想连数据一起删掉是另一条命令（见「卸载」里的 `--purge`）。
 
@@ -167,10 +171,13 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 ## 卸载
 
 ```sh
-dsh plugin --profile web remove dsh-model-metadata     # npm / GitHub / 本地源码装法
-node install-plugin.mjs --uninstall                    # 复制文件装法：只删插件行，拷进去的文件留着
-node install-plugin.mjs --purge                        # 卸载，并把拷进去的文件和目录数据一起删掉
+dsh plugin --profile web remove dsh-model-metadata         # 浏览器版：npm / GitHub / 本地源码装法
+dsh plugin --profile desktop remove dsh-model-metadata     # 桌面版：先完全退出桌面版，再用它装出来的 dsh
+node install-plugin.mjs --uninstall                        # 复制文件装法：只删插件行，拷进去的文件留着
+node install-plugin.mjs --purge                            # 卸载，并把拷进去的文件和目录数据一起删掉
 ```
+
+复制安装器装到哪个 profile，卸载/更新就用同一个 `--profile`（例如 `--profile desktop`）；换一个会留下另一层补丁里的旧行。
 
 用 `--vision` 写过的 systemd drop-in，`--uninstall` 和 `--purge` 会一起删掉。
 
@@ -180,7 +187,7 @@ node install-plugin.mjs --purge                        # 卸载，并把拷进�
 
 - 插件挂在 DSH 内部一个没有公开文档的位置（`PiAiAdapter`）。DSH 升级若改动它，插件会自动停用并打一行日志，不会让 DSH 起不来。
 - 界面读数据用的 `GET /model-metadata/matrix` 不走应用的登录校验（DSH 目前没给插件路由留校验钩子）。它只回答模型名和目录结论，不含地址、也不含任何密钥——但另一面要说清楚：**端口对别人可达的部署，别人也能读到"你配置了哪些模型"**。
-- 不想要这条路由就用开关关掉：`DSH_PI_AI_CATALOG_PANEL=off`。补全本身完全不受影响，编辑器里只是**不会出现那两行控件**（也不会显示任何报错——客户端分不清"开关关了"还是"路由没注册过"，所以它什么都不说）。只想在特定的名字上回应（比如在反代后面）就用 `DSH_PI_AI_CATALOG_PANEL_HOSTS` 给出允许的 Host 列表，不在列表里的 Host 一律拒绝；来自别的站点的浏览器跨站请求也一律拒绝。真要连注册这段代码都去掉，最后的手段才是删掉 `lib/index.mjs` 里的 `registerPanel(ctx, logger)` 一行——那是改源码、插件更新后会回来，能不改就不改；而且它不只去掉那条路由，还会一起失去"打开界面时更新数据"这个时机（`registerPanel` 是那个时机的唯一入口，另一个入口是每小时检查一次的按天规则，不受影响）。
+- 不想要这条路由就用开关关掉：`DSH_PI_AI_CATALOG_PANEL=off`。补全本身完全不受影响，编辑器里只是**不会出现那两行控件**（也不会显示任何报错——客户端分不清"开关关了"还是"路由没注册过"，所以它什么都不说）。只想在特定的名字上回应（比如在反代后面）就用 `DSH_PI_AI_CATALOG_PANEL_HOSTS` 给出允许的 Host 列表，不在列表里的 Host 一律拒绝；来自别的站点的浏览器跨站请求也一律拒绝。唯一的例外是桌面版自己的页面 origin `dsh-app://app`（只限 loopback Host），因为桌面壳把页面和 Host 放在同一个进程里；公网 Host 上它仍然被拒。真要连注册这段代码都去掉，最后的手段才是删掉 `lib/index.mjs` 里的 `registerPanel(ctx, logger)` 一行——那是改源码、插件更新后会回来，能不改就不改；而且它不只去掉那条路由，还会一起失去"打开界面时更新数据"这个时机（`registerPanel` 是那个时机的唯一入口，另一个入口是每小时检查一次的按天规则，不受影响）。
 
 ## 开发
 

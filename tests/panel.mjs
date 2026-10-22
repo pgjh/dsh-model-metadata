@@ -340,6 +340,7 @@ const answer = (request) => new Promise((resolve) => {
 	routes[0].handler(request, res);
 });
 const host = { host: "app.example" };
+const loopback = { host: "127.0.0.1:41127" };
 console.log(JSON.stringify({
 	registered: routes.length,
 	effects,
@@ -349,7 +350,12 @@ console.log(JSON.stringify({
 	post: await answer({ method: "POST", url: "/model-metadata/matrix", headers: host }),
 	crossSite: await answer({ method: "GET", url: "/model-metadata/matrix", headers: { ...host, "sec-fetch-site": "cross-site" } }),
 	foreignOrigin: await answer({ method: "GET", url: "/model-metadata/matrix", headers: { ...host, origin: "https://elsewhere.example" } }),
-	sameOrigin: await answer({ method: "GET", url: "/model-metadata/matrix", headers: { ...host, origin: "http://app.example" } })
+	sameOrigin: await answer({ method: "GET", url: "/model-metadata/matrix", headers: { ...host, origin: "http://app.example" } }),
+	/* The Desktop shell loads the page at dsh-app://app and forwards Host requests to
+	 * the loopback listener; depending on the shell build the Origin survives. */
+	desktop: await answer({ method: "GET", url: "/model-metadata/matrix", headers: { ...loopback, origin: "dsh-app://app" } }),
+	desktopCrossSite: await answer({ method: "GET", url: "/model-metadata/matrix", headers: { ...loopback, origin: "dsh-app://app", "sec-fetch-site": "cross-site" } }),
+	desktopPublicHost: await answer({ method: "GET", url: "/model-metadata/matrix", headers: { ...host, origin: "dsh-app://app" } })
 }));
 `;
 
@@ -386,6 +392,9 @@ expect("a write is refused, and the refusal says what is accepted", [plain.post.
 expect("a page on another origin cannot read it", plain.crossSite.status, 403);
 expect("nor a request that claims the data for another origin", plain.foreignOrigin.status, 403);
 expect("the app's own page still can", plain.sameOrigin.status, 200);
+expect("the Desktop shell's dsh-app://app origin is same-origin over loopback", plain.desktop.status, 200);
+expect("and stays readable when the shell also marks it cross-site", plain.desktopCrossSite.status, 200);
+expect("but that origin cannot unlock a public Host", plain.desktopPublicHost.status, 403);
 const off = routeProbe({ DSH_PI_AI_CATALOG_PANEL: "off" }, "off", false);
 expect("DSH_PI_AI_CATALOG_PANEL=off registers no route at all", off.registered, 0);
 /* An unrecognized value is the documented exception that falls to the *permissive* end
@@ -396,6 +405,9 @@ expect("an unrecognized panel value still registers the route", [unknownPanel.re
 const hostBound = routeProbe({ DSH_PI_AI_CATALOG_PANEL_HOSTS: " app.example , other.example " }, "hosts");
 expect("a configured host is answered", hostBound.get.status, 200);
 expect("and one that was not configured is not", routeProbe({ DSH_PI_AI_CATALOG_PANEL_HOSTS: "other.example" }, "hosts-miss").get.status, 403);
+const hostBoundDesktop = routeProbe({ DSH_PI_AI_CATALOG_PANEL_HOSTS: "other.example" }, "hosts-desktop");
+expect("the Desktop shell still reaches its loopback Host through an allowlist", hostBoundDesktop.desktop.status, 200);
+expect("while a public Host still has to be listed", hostBoundDesktop.desktopPublicHost.status, 403);
 
 WORK.clean();
 
