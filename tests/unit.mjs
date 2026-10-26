@@ -10,9 +10,10 @@
  * flattening rule or a merge rule fails here — named — instead of surfacing as a
  * puzzling difference three layers up.
  *
- * Four things here are drift checks rather than behaviour checks, and they are
+ * Five things here are drift checks rather than behaviour checks, and they are
  * the reason the suite exists:
  *   - `NAME_SUFFIXES` against the list the README publishes;
+ *   - `DEPLOYMENT_QUALIFIERS` against the list the README publishes;
  *   - `MIN_NORMALIZED_LENGTH` against the boundary this suite pins;
  *   - `source` in a snapshot against the URL that was actually fetched (a mirror
  *     used to be recorded as the shipped endpoint);
@@ -30,7 +31,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { expandRoots } from "../dev-paths.mjs";
-import { NAME_SUFFIXES, MIN_NORMALIZED_LENGTH, bareName, normalizeName, normalizedKeys } from "../lib/names.mjs";
+import { DEPLOYMENT_QUALIFIERS, NAME_SUFFIXES, MIN_NORMALIZED_LENGTH, bareName, deploymentKeys, normalizeName, normalizedKeys } from "../lib/names.mjs";
 import { SNAPSHOT_URL, fetchModelsDevSnapshot, fetchModelsDevSnapshotIfChanged, flattenModelsDev, looksNonChat } from "../lib/snapshot.mjs";
 import { applyChoice, buildMatrix, buildOps } from "../lib/panel.mjs";
 
@@ -125,20 +126,41 @@ async function rejection(label, run) {
 /**
  * The name suffixes the README promises, read out of the document instead of
  * restated here: a list copied into the test would drift exactly like the code
- * it is meant to check. The list is the line carrying two or more backticked
- * `-word` entries; a line that mentions one suffix inline is not the list, and a
- * README reformatted so that no line carries two is reported by the guard below
- * rather than silently agreeing with everything.
+ * it is meant to check. The list is the line that names `-exp` and carries two
+ * or more backticked `-word` entries; a line that mentions one suffix inline is
+ * not the list, and a README reformatted so that no line carries two is reported
+ * by the guard below rather than silently agreeing with everything.
+ *
+ * The deployment-qualifier list is a different paragraph with a different rule
+ * (stripped from the configured name, never appended), so it is read by
+ * {@link documentedQualifiers} instead of leaking into this list.
  * @param markdown - the whole document.
  * @returns the suffixes it lists, deduplicated, in order of appearance.
  */
 function documentedSuffixes(markdown) {
 	const found = new Set();
 	for (const line of markdown.split("\n")) {
+		if (!line.includes("`-exp`")) continue;
 		const spans = [...line.matchAll(/`-([a-z]+)`/g)].map((match) => match[1]);
 		if (spans.length >= 2) for (const suffix of spans) found.add(suffix);
 	}
 	return [...found];
+}
+
+/**
+ * The deployment qualifiers the README promises, read from the paragraph that
+ * enumerates them — for the same reason as above, and with the same guard: a
+ * run that parses fewer than two reports it instead of agreeing with a document
+ * that stopped describing the rule.
+ * @param markdown - the whole document.
+ * @returns the qualifiers it lists, deduplicated, in order of appearance.
+ */
+function documentedQualifiers(markdown) {
+	for (const line of markdown.split("\n")) {
+		if (!line.includes("部署限定词")) continue;
+		return [...new Set([...line.matchAll(/`-([a-z]+)`/g)].map((match) => match[1]))];
+	}
+	return [];
 }
 
 /* ------------------------------------------------------------------ names.mjs */
@@ -163,10 +185,32 @@ expect("a name missing a decoration still reaches the decorated catalog entry", 
 const freeKeys = normalizedKeys("gpt-4o-free");
 expect("a configured decoration is never stripped, and keys only ever append", [freeKeys[0], freeKeys.includes("gpt4o"), freeKeys.filter((key) => !key.startsWith("gpt4ofree"))], ["gpt4ofree", false, []]);
 
-const documented = documentedSuffixes(readFileSync(README, "utf8"));
+/*
+ * The other direction, on its own list and on its own terms. A gateway often
+ * publishes one model twice — once under its own name and once marked as the
+ * deployment serving it (`-self`, `-official`). Those qualifiers are stripped
+ * *from the configured name only*, and only after the append-only tier found
+ * nothing at all (that ordering lives in the resolver, not here; what this pins
+ * is which keys the fallback tier may produce).
+ */
+const selfKeys = deploymentKeys("deepseek-v4.1-flash-self");
+expect("a deployment qualifier yields the unqualified spelling with its decorations", [selfKeys.includes("deepseekv41flash"), selfKeys.includes("deepseekv41flashexp")], [true, true]);
+expect("the first tier still never strips, so a resolver can prefer a literal match", normalizedKeys("deepseek-v4.1-flash-self").includes("deepseekv41flash"), false);
+expect("official is stripped the same way, separators included", [deploymentKeys("deepseek-v4-flash-official").includes("deepseekv4flash"), deploymentKeys("DeepSeek_V4_Flash_Official").includes("deepseekv4flash")], [true, true]);
+expect("only a separate trailing word is a qualifier, never a substring or an endpoint tier", [deploymentKeys("myself"), deploymentKeys("gpt-4o-free"), deploymentKeys("official")], [[], [], []]);
+expect("qualifiers stack, and a name made only of them never decays to a shorter word", [deploymentKeys("foo-model-official-self").includes("foomodel"), deploymentKeys("self-self")], [true, []]);
+expect("a stripped spelling below the length floor produces no key", deploymentKeys("x-self"), []);
+
+const readmeText = readFileSync(README, "utf8");
+const documented = documentedSuffixes(readmeText);
 ok("the README's suffix list is still readable by this check", documented.length >= 4, `parsed ${JSON.stringify(documented)}`);
 expect("every suffix the README promises is implemented", documented.filter((suffix) => !NAME_SUFFIXES.includes(suffix)), []);
 expect("NAME_SUFFIXES is exactly the list the suite pins", NAME_SUFFIXES, ["exp", "experimental", "latest", "preview", "free"]);
+
+const documentedDeployment = documentedQualifiers(readmeText);
+ok("the README's deployment-qualifier list is still readable by this check", documentedDeployment.length >= 2, `parsed ${JSON.stringify(documentedDeployment)}`);
+expect("every deployment qualifier the README promises is implemented", documentedDeployment.filter((qualifier) => !DEPLOYMENT_QUALIFIERS.includes(qualifier)), []);
+expect("DEPLOYMENT_QUALIFIERS is exactly the list the suite pins", DEPLOYMENT_QUALIFIERS, ["self", "official"]);
 /*
  * Reported, not failed. Documented-but-missing is a code bug and fails above;
  * implemented-but-undocumented is a gap in a document this suite does not own,

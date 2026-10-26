@@ -149,6 +149,8 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
   2. 忽略 `.`、`-`、`_` 和空格再比一次——`deepseek-v41-flash`、`deepseek-v4.1-flash`、"DeepSeek V41 Flash" 都读作同一个名字（网关别名差的基本就是这点写法）；
   3. **显示名也算数**——官方 DeepSeek 路由把 V41 flash 叫 `deepseek-flash`、显示成 "DeepSeek-V41-Flash"，按显示名就能对上；
   4. 目录里的名字多带一个 `-exp`、`-experimental`、`-latest`、`-preview`、`-free` 后缀也算——`DeepSeek-V4-Flash-Vision` 对上 `deepseek-v4-flash-vision-exp`。这个宽松只朝**一个方向**：目录里的名字可以多一个装饰后缀，你自己写的名字多带则不算同一个（`gpt-4o-free` 不是 `gpt-4o`——同名的 `-free` 端点经常是另一套部署、另一个窗口）。
+  5. **部署限定词**：你自己写的名字末尾多一个 `-self` 或 `-official`（同一个网关常把同一个型号既按原名挂一份、又按"自建 / 官方"部署挂一份）也算同一个模型——但只在前面几条**全都查不到**时才这样剥，而且只从你写的名字上剥，绝不会反过来给目录里的名字加。
+     `-free` 不剥：它仍然是另一套部署，窗口经常也不一样。
 - 查的顺序（先查到的赢）：模型自家厂商的**官方**路由（glm→智谱、kimi→月之暗面、deepseek→**官方 `deepseek-official` 路由自己的目录**、gpt→openai、claude→anthropic…）→ DSH 内置目录（pi-ai）的其余部分 → opencode 聚合器 → models.dev 快照。官方目录在 `@deepseek-ai/dsh-llm-deepseek` 里，不翻 pi-ai 目录就查不到它——所以这一路是单独去问的（你在 `llm-deepseek` 设置段里改过的目录也会被用上）；聚合器是转抄别人目录的，所以永远排在正经目录后面，只用来补缺。
 - models.dev 那一层里，同一个名字往往有好几家 provider 都发布，数字并不一致，所以里面的顺序是：**这个模型自家厂商发布的行** → **id 正好等于裸名的行** → 别人转抄或起别名的行 → 看起来不像聊天模型的行（图片、embedding、语音这类端点只是排在最后，不会让本来能匹配的名字变成「无匹配」）。
 - **新加的网关不用注册任何东西**，加完就能认；官方路由新出的型号在 models.dev 跟上之前，也能靠官方目录先对上。

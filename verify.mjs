@@ -233,6 +233,17 @@ expect("plugin: the official deepseek catalog answers the v41 alias", rowOf(plug
 expect("plugin: the alias gets the official route's own effort levels", rowOf(plugin, "probe/deepseek-v41-flash").reasoning, ["off", "low", "high", "max"]);
 expect("plugin: the dotted v4.1 spelling matches the same model", rowOf(plugin, "probe/deepseek-v4.1-flash").contextWindow, OFFICIAL_FLASH.contextWindow);
 expect("plugin: a name missing the catalog's -exp suffix still matches", rowOf(plugin, "probe/DeepSeek-V4-Flash-Vision").input, ["text", "image"]);
+/*
+ * A gateway alias that marks its own deployment (`-self`, `-official`) names the
+ * same model; the qualifier is stripped only after every literal tier missed, so
+ * the row takes the official route's numbers. A `-free` suffix is a different
+ * deployment with its own catalog row, and that row must win instead.
+ */
+expect("plugin: a deployment qualifier on the configured name still matches", rowOf(plugin, "probe/deepseek-v4.1-flash-self").contextWindow, OFFICIAL_FLASH.contextWindow);
+expect("plugin: and it borrows the same levels as the unqualified alias", rowOf(plugin, "probe/deepseek-v4.1-flash-self").reasoning, rowOf(plugin, "probe/deepseek-v4.1-flash").reasoning);
+const FREE_FLASH = catalogRow("opencode", "deepseek-v4.1-flash-free");
+expect("plugin: a -free suffix keeps that deployment's own numbers", [rowOf(plugin, "probe/deepseek-v4.1-flash-free").contextWindow, rowOf(plugin, "probe/deepseek-v4.1-flash-free").maxTokens], [FREE_FLASH.contextWindow, FREE_FLASH.maxTokens]);
+expect("plugin: and does not borrow the qualified model's", rowOf(plugin, "probe/deepseek-v4.1-flash-free").contextWindow === OFFICIAL_FLASH.contextWindow, false);
 expect("plugin: the models.dev tier covers a model no bundled catalog has", rowOf(plugin, "probe/zephyr-9-pro").contextWindow, 900000);
 /*
  * Aggregators mirror other people's catalogs, so a catalog route that carries

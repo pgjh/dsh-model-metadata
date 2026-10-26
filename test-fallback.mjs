@@ -151,6 +151,10 @@ function loadProviders() {
 					{ id: "probe/deepseek-v4.1-flash", name: "probe/deepseek-v4.1-flash" },
 					{ id: "probe/deepseek-v41-flash", name: "probe/deepseek-v41-flash" },
 					{ id: "probe/DeepSeek-V4-Flash-Vision", name: "probe/DeepSeek-V4-Flash-Vision" },
+					/* the same model under a gateway's deployment qualifier */
+					{ id: "probe/deepseek-v4.1-flash-self", name: "probe/deepseek-v4.1-flash-self" },
+					/* a configured suffix that is not a deployment marker: its own row wins */
+					{ id: "probe/deepseek-v4.1-flash-free", name: "probe/deepseek-v4.1-flash-free" },
 					/* a model only the models.dev fixture knows */
 					{ id: "probe/zephyr-9-pro", name: "probe/zephyr-9-pro" },
 					/* the same name from two snapshot providers, one of them the vendor */
