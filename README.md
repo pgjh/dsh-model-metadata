@@ -168,6 +168,8 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 
 **来源写着第三方（`models.dev:xxx`、`openrouter`）可信吗？** 一般没问题，结论行会写出来源；不对就在那一行改写，你自己的声明永远优先。
 
+**网关上"不思考"发的是什么？** 你选的等级会变成请求体里的 `reasoning.effort`。借来的等级表只用来回答「这个模型有哪些等级」，`off` 一律发 `none`——因为它原来那条路由的写法（官方 DeepSeek 是 `thinking.type: disabled`，根本不发这个字符串）在别人的端点上不成立。早先直接照抄，会让**没选等级**的请求（新会话第一轮、会话标题、压缩）都带上 `"effort":"off"`，被网关判成 `level "off" not supported, valid levels: low, medium, high`，整轮失败。目录里写着"这条路由无法表达关闭"的（`off: null`），就干脆不发这个字段。
+
 **手机上能用吗？** 能。两个选择器用的是 DSH 自己的菜单，不会弹系统那套全屏单选。
 
 ## 卸载
@@ -212,6 +214,7 @@ npm run test:unit        # 不需要 DSH 安装：unit + install-plugin + refres
 | ✔ `tests/hot-snapshot.mjs` | 同上 | 目录数据换了以后，同一个进程里下次解析就用新数据 |
 | ✔ `tests/hot-add-model.mjs` | 同上 | 运行中新增的模型也会被补全 |
 | ✔ `tests/settings-service.mjs` | 同上 | DSH 0.2.1 起从 `settings` 服务读声明：声明仍优先、界面数据不为空 |
+| ✔ `tests/wire-effort.mjs` | 同上 | 网关真正收到的 `reasoning.effort`：没选等级/选 off 时发 `none`，绝不再发 `off` |
 | `tests/browser-check.mjs` | 跑着的 dsh + Chromium | 真浏览器里验收界面 |
 | `tests/fusion-write.mjs` | 跑着的 dsh + Chromium | 真点一次「写入」，跑完把配置还原 |
 | `tests/new-route.mjs` | 跑着的 dsh + Chromium | 临时加一个网关，验证"新网关自动匹配"，跑完还原 |
@@ -251,6 +254,7 @@ dev-paths.mjs            开发工具找 DSH 与浏览器的唯一出处（不�
 tests/harness.mjs        各套件共用的脚手架
 tests/unit.mjs           三个纯模块的套件
 tests/install-plugin.mjs 复制安装器的套件
+tests/wire-effort.mjs    网关真正收到的 reasoning.effort（没选等级时不许是 off）
 tests/cdp.mjs            三个浏览器工具共用的 CDP 驱动
 tests/snapshot-fixture.json  回归测试用的两条目录数据（让结果与当天数据无关）
 CHANGELOG.md             每个版本改了什么
