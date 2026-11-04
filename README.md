@@ -107,7 +107,7 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 
 一次检查不一定等于一次下载：请求会带上本地数据里存的 ETag，models.dev 回一个**没有内容的 304** 就说明数据没变——这时只把本地文件的时间戳重新盖一次，不重新下载。下载**失败**也不会被反复重试：自动触发的两次尝试之间至少隔 5 分钟，所以网络不通时反复打开界面不会变成一连串下载请求（手动跑 `refresh-snapshot.mjs` 不受这条限制）。
 
-数据存在 **`$DSH_HOME/models-dev-snapshot.json`**（当前约 0.6 MB，随 models.dev 数据量增长；机器上只此一份，所有 profile 共用）。放这里是有意的：更新插件会替换整个插件目录，数据若跟着插件走就会被一起丢掉、下次启动还得重下一遍；放在 DSH home 里，**更新插件完全不会碰它，也不用等下载**。装好第一次启动时如果还没有数据，它会自己下载一份（约 5 MB，几秒钟）。想换位置就用 `DSH_PI_AI_CATALOG_SNAPSHOT` 指到别处。
+数据存在 **`$DSH_HOME/models-dev-snapshot.json`**（2026-11 时约 1.4 MB、8926 行，随 models.dev 数据量增长；机器上只此一份，所有 profile 共用）。放这里是有意的：更新插件会替换整个插件目录，数据若跟着插件走就会被一起丢掉、下次启动还得重下一遍；放在 DSH home 里，**更新插件完全不会碰它，也不用等下载**。装好第一次启动时如果还没有数据，它会自己下载一份（约 6 MB，几秒钟）。想换位置就用 `DSH_PI_AI_CATALOG_SNAPSHOT` 指到别处。
 
 ### 开关（环境变量，按需）
 
@@ -168,7 +168,7 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 
 **来源写着第三方（`models.dev:xxx`、`openrouter`）可信吗？** 一般没问题，结论行会写出来源；不对就在那一行改写，你自己的声明永远优先。
 
-**网关上"不思考"发的是什么？** 你选的等级会变成请求体里的 `reasoning.effort`。借来的等级表只用来回答「这个模型有哪些等级」，`off` 一律发 `none`——因为它原来那条路由的写法（官方 DeepSeek 是 `thinking.type: disabled`，根本不发这个字符串）在别人的端点上不成立。早先直接照抄，会让**没选等级**的请求（新会话第一轮、会话标题、压缩）都带上 `"effort":"off"`，被网关判成 `level "off" not supported, valid levels: low, medium, high`，整轮失败。目录里写着"这条路由无法表达关闭"的（`off: null`），就干脆不发这个字段。
+**网关上"不思考"发的是什么？** 你选的等级会变成请求体里的 `reasoning.effort`。借来的等级表只用来回答「这个模型有哪些等级」，`off` 一律发 `none`——因为它原来那条路由的写法（官方 DeepSeek 是 `thinking.type: disabled`，根本不发这个字符串）在别人的端点上不成立。早先直接照抄，会让**没选等级**的请求（新会话第一轮、会话标题、压缩）都带上 `"effort":"off"`，被网关判成 `level "off" not supported, valid levels: low, medium, high`，整轮失败。目录里写着"这条路由无法表达关闭"的（`off: null`），就干脆不发这个字段。还要知道一件事：**`none` 只是"最接近关闭且网关肯接受"的写法**，它不保证端点真的不思考——实测同一个网关里 `claude-*` 收到 `none` 就不思考了，而 `deepseek-*` / `glm-*` / `minimax-*` 不管发 `none`、`effort: high` 还是干脆不发这个字段，返回里照样有 reasoning（`thinking.type: disabled` 那种原生写法也被忽略）。插件无法从目录里看出某个端点会不会照做，所以选「关闭推理」在那些模型上只是不发一个会被拒的值，省不省得下推理 token 取决于端点。
 
 **手机上能用吗？** 能。两个选择器用的是 DSH 自己的菜单，不会弹系统那套全屏单选。
 
@@ -218,7 +218,7 @@ npm run test:unit        # 不需要 DSH 安装：unit + install-plugin + refres
 | `tests/browser-check.mjs` | 跑着的 dsh + Chromium | 真浏览器里验收界面 |
 | `tests/fusion-write.mjs` | 跑着的 dsh + Chromium | 真点一次「写入」，跑完把配置还原 |
 | `tests/new-route.mjs` | 跑着的 dsh + Chromium | 临时加一个网关，验证"新网关自动匹配"，跑完还原 |
-| `tests/live-refresh.mjs` | 联网（约 5 MB） | 真去 models.dev 拉一次，验证自动更新 |
+| `tests/live-refresh.mjs` | 联网（约 6 MB） | 真去 models.dev 拉一次，验证自动更新 |
 | `tests/harness.mjs` | — | 不是套件：上面各套件共用的脚手架（断言、临时目录、Cordis 上下文替身） |
 
 每个套件跑完都会打印一行 `N/M assertions passed`；`verify.mjs` 连这一行也检查，套件"一个断言都没做就退出 0"会被判失败。
@@ -267,7 +267,7 @@ npm 包里发的是 `lib/index.mjs`、`lib/names.mjs`、`lib/panel.mjs`、`lib/s
 遇到问题、想让某个名字被认出来、或想改点别的，直接开 issue：<https://github.com/pgjh/dsh-model-metadata/issues>——带上 DSH 版本和插件启动那行日志，形如：
 
 ```
-dsh-model-metadata: installed (mode full+levels:on+input:on, refresh 24h + on start always (floor 15m) + on open 6h + daily check 1h, panel on, adapter <…>/dsh-llm-pi-ai/lib/index.js, catalog <…>/pi-ai/dist/providers/all.js, model names indexed 2604, official deepseek catalog 4 models, snapshot entries 3698)
+dsh-model-metadata: installed (mode full+levels:on+input:on, refresh 24h + on start always (floor 15m) + on open 6h + daily check 1h, panel on, adapter <…>/dsh-llm-pi-ai/lib/index.js, catalog <…>/pi-ai/dist/providers/all.js, model names indexed 3045, official deepseek catalog 2 models, snapshot entries 8926)
 ```
 
 （这行里有用的就是括号里那几段开关状态和三个数字；它不含地址也不含密钥。）另外**别贴 `baseURL`、API key 或任何 credentials**：真正需要的是模型名和目录来源，够定位了。

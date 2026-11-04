@@ -9,6 +9,10 @@
 - **网关不再收到 `level "off"` 而整轮失败**：借来的等级表原来整份照抄，包括 `off` 的写法。官方 DeepSeek 目录里的 `off` 只是**等级 id**（它自己发的是 `thinking.type: disabled`，从不发这个字符串），抄到 OpenAI 兼容网关上就成了每次请求都带 `reasoning.effort: "off"`——尤其是**没选等级**的那些（新会话第一轮、会话标题、会话压缩），网关只认 `low / medium / high`，于是 `400: {"message":"level \"off\" not supported, valid levels: low, medium, high"}`。现在借来的等级表把 `off` 统一写成 `none`（pi-ai 给缺省 `off` 用的拼写，也是 OpenAI 协议族里"不思考"的值），`low / high / max` 等照旧按名字发；目录里本来就写 `off: null`（意思是"这条路由没法表达关闭，别发这个字段"）的保持原样。
 - **回归测试 `tests/wire-effort.mjs`**：用真的 `PiAiAdapter` 模型 + 真的 pi-ai `openai-responses` 请求构造器，抓 `onPayload` 断言网关真正收到的请求体——"没选等级""选了 off"都必须发 `none`，并且遍历三个来源（官方目录、写着 `none` 的目录、写着 `null` 的目录）确认任何组合都不会出现 `effort: "off"`。去掉修复后这个套件会精确复现那两条 `off`。
 
+### 注意
+
+- `none` 只是"网关肯接受、最接近关闭"的写法，不是"一定不思考"的保证。实测同一网关：`claude-*` 收到 `none` 就停止思考；`deepseek-*` / `glm-*` / `minimax-*` 无论发 `none`、发 `high`、还是干脆不发这个字段，返回里照样带 reasoning（连 DeepSeek 原生的 `thinking.type: disabled` 也被忽略）。这类端点行为插件无法从目录里判断，所以「关闭推理」在这些模型上不会报错，但也省不下推理 token。
+
 ## 0.3.3
 
 ### 修复
