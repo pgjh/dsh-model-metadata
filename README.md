@@ -172,6 +172,8 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 
 **手机上能用吗？** 能。两个选择器用的是 DSH 自己的菜单，不会弹系统那套全屏单选。
 
+**网关模型收到的是 `system` 还是 `developer`？** 是 `system`。DSH 底层（pi-ai）给"会推理"的模型把系统提示词写成 `role: "developer"`，给不会推理的写 `role: "system"`。你在网关上手写的模型本来是"不会推理"，端点只见过 `system`；插件补上推理能力后这个拼写会跟着变，而有的网关直接拒收：`400 {"code":3000101,"msg":"invalid parameter"}`（同一网关的另一条路由反而认 `developer`，所以只炸一部分模型，像随机故障）。所以补全推理能力时插件把这条钉回 `system`；你在路由上自己声明过 `compat` 的话以你为准。
+
 ## 卸载
 
 ```sh

@@ -264,7 +264,14 @@ expect("plugin: the hy family keeps its aggregator upstream", rowOf(plugin, "pro
 expect("plugin: the route's own api is kept", glm.api, "openai-responses");
 expect("plugin: the route's own baseUrl is kept", glm.baseUrl, "http://127.0.0.1:1/v1");
 expect("plugin: catalog cost is not copied in", glm.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-expect("plugin: catalog compat is not copied in", glm.compat, undefined);
+/*
+ * The catalog's `compat` is still not copied in — but turning reasoning on has to
+ * pin one wire detail of its own: pi-ai spells the system prompt "developer" for a
+ * reasoning model and "system" for every other one, and an endpoint that has only
+ * ever received the latter rejects the former (400 invalid parameter). So the
+ * borrow adds exactly that one field, nothing from the catalog's compat.
+ */
+expect("plugin: catalog compat is not copied in, and the borrow pins only the system-prompt role", glm.compat, { supportsDeveloperRole: false });
 
 /* Scenario 3: explicit settings always win. */
 const declared = run(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", PRECEDENCE]);

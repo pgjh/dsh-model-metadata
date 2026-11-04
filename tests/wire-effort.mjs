@@ -73,7 +73,15 @@ const surface = (id) => adapter.current().models.getModel("probe", id);
 async function payload(id, level) {
 	const model = surface(id);
 	if (model === undefined) throw new Error(`no model ${id}`);
-	const context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }], systemPrompt: "", tools: [] };
+	/*
+	 * The system prompt travels as a leading transcript message, which is how the
+	 * adapter hands it over: that is the shape pi-ai spells as `role: "system"` or
+	 * `role: "developer"` depending on the model's reasoning flag.
+	 */
+	const context = { messages: [
+		{ role: "system", content: "You are a coding agent.", timestamp: 0 },
+		{ role: "user", content: "hi", timestamp: Date.now() }
+	], tools: [] };
 	let capturedBody;
 	const capturedAsJson = (params) => {
 		capturedBody = params;
@@ -126,6 +134,18 @@ for (const id of ["probe/deepseek-v4.1-flash", "probe/glm-5.2", "probe/kimi-k3"]
 	}
 }
 expect("no model on an OpenAI-compatible route ever sends the level off", spelled, []);
+
+/*
+ * Turning reasoning on flips a second wire detail that has nothing to do with
+ * reasoning: pi-ai spells the system prompt `role: "developer"` for a reasoning
+ * model and `role: "system"` for every other one. A hand-declared gateway model
+ * was non-reasoning before this plugin described it, and one such endpoint
+ * answers the other spelling with `400 {"code":3000101,"msg":"invalid parameter"}`
+ * (measured; its sibling route accepts "developer", which is why this only shows
+ * up on some models). The borrow therefore pins the role the route already used.
+ */
+expect("turning reasoning on pins the system-prompt role the route already accepted", deepseek?.compat?.supportsDeveloperRole, false);
+expect("so the system prompt still travels as system", [unnamed.input[0]?.role, max.input[0]?.role], ["system", "system"]);
 
 /*
  * The other two sources keep their own meaning: a catalog that already says
