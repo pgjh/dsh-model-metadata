@@ -62,8 +62,28 @@ const adapter = captured.adapter;
 const infoOf = (id) => adapter.resolveModel("probe", id);
 const contextOf = async (id) => (await infoOf(id)).context?.contextWindow;
 
+/*
+ * What the route reports on its own, without the plugin: pi-ai's number for a route
+ * that declares no capacity. Read from a pristine adapter instead of pinned here — the
+ * installed adapter owns that value (0.2.2 moved it to 1M), and the assertion below is
+ * "the undescribed model is left on the default", not "the default is 262144".
+ */
+const pristine = {};
+const pristineCtx = {
+	...ctx,
+	llm: {
+		...ctx.llm,
+		registerAdapter: (_routes, instance) => {
+			pristine.adapter = instance;
+			return { replace: () => {} };
+		}
+	}
+};
+apply(pristineCtx, typeof Config === "function" ? Config(providers) : providers);
+const ROUTE_DEFAULT = (await pristine.adapter.resolveModel("probe", "acme/brand-new-model")).context?.contextWindow;
+
 /* 1. nothing anywhere describes this model yet */
-expect("undescribed model starts on the route default", await contextOf("acme/brand-new-model"), 262144);
+expect("undescribed model starts on the route default", await contextOf("acme/brand-new-model"), ROUTE_DEFAULT);
 expect("a bundled-catalog model resolves from the catalog", await contextOf("acme/glm-5.3"), 1000000);
 
 /* 2. the snapshot adds it — no restart */

@@ -230,6 +230,87 @@ expect("the bundle registers itself under the package's own name", [registration
 	const write = dirtyNodes.find((node) => node.type === "button" && node.children?.[0] === "写入");
 	expect("cells: a changed row offers the write button, styled as the page's own", [write !== undefined, write.props.className, write.props.style], [true, "page-button", undefined]);
 	expect("cells: choosing 自定义… reveals the text field instead of a platform input", client.LEVEL_PRESETS.every(([value]) => value !== client.CUSTOM), true);
+
+	/*
+	 * The row DOM is the one contract a client plugin cannot import: it reads the page it
+	 * is injected into. DSH 0.2.1 drew a row as `[id input, name input, 模型选项, 删除]`;
+	 * 0.2.2 prepends a drag handle and wraps both text inputs in <label>s, so the id input
+	 * stopped being the row's first child and every fused cell stopped mounting ("自动匹配
+	 * 不见了"). These two fixtures are the shapes, reduced to what the watcher reads.
+	 */
+	const fakeElement = (tag, options = {}) => {
+		const node = {
+			tagName: tag.toUpperCase(),
+			children: options.children ?? [],
+			value: options.value,
+			attributes: options.attributes ?? {},
+			parentElement: null
+		};
+		node.getAttribute = (name) => (name in node.attributes ? node.attributes[name] : null);
+		node.hasAttribute = (name) => name in node.attributes;
+		node.closest = (selector) => {
+			for (let current = node; current !== null; current = current.parentElement) if (fakeMatches(current, selector)) return current;
+			return null;
+		};
+		node.querySelectorAll = (selector) => {
+			const hits = [];
+			const visit = (current) => {
+				for (const child of current.children) {
+					if (fakeMatches(child, selector)) hits.push(child);
+					visit(child);
+				}
+			};
+			visit(node);
+			return hits;
+		};
+		for (const child of node.children) child.parentElement = node;
+		return node;
+	};
+	const fakeMatches = (node, selector) => {
+		if (selector === "button[aria-expanded]") return node.tagName === "BUTTON" && node.hasAttribute("aria-expanded");
+		if (selector === `[${client.CELL_ATTR}]`) return node.hasAttribute(client.CELL_ATTR);
+		if (selector === 'input[type="text"]') return node.tagName === "INPUT" && node.getAttribute("type") === "text";
+		throw new Error(`the fake DOM does not know the selector "${selector}"`);
+	};
+	/* A control of ours: a Menu trigger with aria-expanded, inside our own cell. It must
+	 * never be counted as a model row's disclosure. */
+	const ourCell = fakeElement("div", { attributes: { [client.CELL_ATTR]: "" }, children: [fakeElement("button", { attributes: { "aria-expanded": "false" } })] });
+
+	const legacyId = fakeElement("input", { attributes: { type: "text" }, value: "probe/legacy" });
+	const legacyToggle = fakeElement("button", { attributes: { "aria-expanded": "true" } });
+	const legacyRow = fakeElement("div", { children: [legacyId, fakeElement("input", { attributes: { type: "text" }, value: "legacy" }), legacyToggle, fakeElement("button")] });
+	const legacyEntry = fakeElement("div", { children: [legacyRow, fakeElement("div", { children: [fakeElement("input", { attributes: { type: "text", inputMode: "numeric" } })] }), ourCell] });
+	const legacyCard = fakeElement("li", { children: [legacyEntry] });
+
+	const modernIdInput = fakeElement("input", { attributes: { type: "text" }, value: "qwenclaw/deepseek-v4-flash-0731" });
+	const modernToggle = fakeElement("button", { attributes: { "aria-expanded": "true" } });
+	const modernRow = fakeElement("div", { children: [
+		fakeElement("button", { attributes: { "aria-label": "拖拽排序" } }),
+		fakeElement("label", { children: [modernIdInput] }),
+		modernToggle,
+		fakeElement("button"),
+		fakeElement("label", { children: [fakeElement("input", { attributes: { type: "text" }, value: "deepseek-v4-flash-0731" })] })
+	] });
+	const modernEntry = fakeElement("div", { children: [modernRow, fakeElement("div", { children: [fakeElement("fieldset")] }), ourCell] });
+	const modernCard = fakeElement("li", { children: [modernEntry] });
+
+	expect("rows: 0.2.1's row is still one row, and the id is its first cell", [client.rowToggles(legacyCard).length, client.idInputOf(legacyRow).value, client.readoutOnlyRow(legacyRow)], [1, "probe/legacy", false]);
+	expect("rows: a row's own disclosure is the one it carries, not ours", client.rowToggles(legacyCard)[0] === legacyToggle, true);
+	expect("rows: 0.2.2's row is found too, with the id inside its label", [client.rowToggles(modernCard).length, client.idInputOf(modernRow).value], [1, "qwenclaw/deepseek-v4-flash-0731"]);
+	expect("rows: every card of the editor is searched, not just the first row", client.rowToggles(fakeElement("li", { children: [legacyEntry, modernEntry] })).length, 2);
+	expect("rows: a row without a text input is not a model row", client.idInputOf(fakeElement("div", { children: [fakeElement("button")] })), null);
+	/* 0.2.2 draws its own 推理等级/输入类型 controls, saved by the editor's own 保存: the
+	 * cell must report the verdict and draw nothing that would be a second control for
+	 * the same stored field. */
+	expect("rows: 0.2.2's row asks for the readout only; 0.2.1's still gets the pickers", [client.readoutOnlyRow(modernRow), client.readoutOnlyRow(legacyRow)], [true, false]);
+	const readoutNodes = [];
+	walk(client.Cell({ row: bareRow, choice: client.initialChoice(bareRow), classes: {}, message: undefined, busy: false, readoutOnly: true, dirty: false, onChoice: () => {}, onCommit: () => {} }), (node) => readoutNodes.push(node));
+	expect("rows: the readout-only cell is still one cell, marked as ours", readoutNodes[0].props[client.CELL_ATTR], "");
+	expect("rows: it draws no control that could duplicate upstream's", readoutNodes.some((node) => node.type === "button" || node.type === "select"), false);
+	expect("rows: and it still says what the chain matched", readoutNodes.some((node) => node.type === "p" && String(node.children?.[0] ?? "").startsWith("自动匹配：zai")), true);
+	const fullNodes = [];
+	walk(client.Cell({ row: bareRow, choice: client.initialChoice(bareRow), classes: { control: "page-input" }, message: undefined, busy: false, readoutOnly: false, dirty: false, onChoice: () => {}, onCommit: () => {} }), (node) => fullNodes.push(node));
+	expect("rows: the full cell is what 0.2.1 still gets", fullNodes.filter((node) => node.props?.items !== undefined && node.props?.anchor !== undefined).length, 2);
 }
 
 /*

@@ -44,7 +44,7 @@ llm-pi-ai:
 
 1. **按模型名查**：取 id 里最后一个 `/` 后面的名字（`my-gateway/gpt-4o` → `gpt-4o`），按"官方路由 → 内置目录 → opencode → models.dev"的顺序查（详见下面「哪些名字认得出」），查到之后，就把这个模型该有的上下文长度、输出上限、推理等级、图片支持补上去。名字的写法差一点也没关系：`deepseek-v41-flash`、`deepseek-v4.1-flash`、"DeepSeek-V41-Flash" 算同一个名字，显示名和 `-exp` 之类的后缀也能对上。
 2. **只补缺的**：你在设置里亲手写过的字段，它不动。反过来，**它读不到这些声明时也绝不猜**，并在日志里说明原因（`enrichment off (…)`）：这时候"你有没有声明"是它看不见的事实，而"借用"会把你亲手钉住的 64K 覆盖成目录里的 272K。声明从哪来跟 DSH 版本走：0.2.1 起是当前 profile 的配置（通过 DSH 的 `settings` 服务读取，`settings.yaml` 已被 DSH 自己改名成 `settings.yaml.imported`）；更早的版本读 `$DSH_HOME/settings.yaml`。旧文件不存在、没有 YAML 解析器、或者你正编辑到一半 YAML 语法坏了，都算"读不到"。
-3. **界面上给你两个开关**：推理等级、视觉。DSH 官方界面没有这两个控件，这里是唯一的图形入口；改完点「写入」固定下来，不点就一直跟着目录走。写入是**按行**的：双击只写一次，也不会把别的行还没写入的改动丢掉；只读的部署会直接说明写不了。这两个控件和结论行跟随设置页的语言（简体中文 / English）。
+3. **界面上给你两个开关**：推理等级、视觉。DSH 0.2.1 及更早的界面没有这两个控件，这里是唯一的图形入口；改完点「写入」固定下来，不点就一直跟着目录走。写入是**按行**的：双击只写一次，也不会把别的行还没写入的改动丢掉；只读的部署会直接说明写不了。DSH 0.2.2 起设置页自己就画了这两个控件（「推理等级」「输入类型」，随卡片自己的「保存」生效），插件在那类页面上**不再画第二套**，只保留结论行（`自动匹配：<路由> · 1M / 输出 128K · 有推理等级 · 视觉`，没匹配到就是 `无匹配：…`）：一个字段永远只有一个控件。结论行和控件都跟随设置页的语言（简体中文 / English）。
 4. **目录数据自己更新**：启动、打开界面、以及按天（每小时检查一次是否过期）各更新一次 models.dev，所以新模型不用你手动管；数据没变时只确认一次，不重新下载。
 
 ## 安装
@@ -226,7 +226,8 @@ npm run test:unit        # 不需要 DSH 安装：unit + install-plugin + refres
 | ✔ `tests/hot-add-model.mjs` | 同上 | 运行中新增的模型也会被补全 |
 | ✔ `tests/settings-service.mjs` | 同上 | DSH 0.2.1 起从 `settings` 服务读声明：声明仍优先、界面数据不为空 |
 | ✔ `tests/wire-effort.mjs` | 同上 | 网关真正收到的 `reasoning.effort`：没选等级/选 off 时发 `none`，绝不再发 `off` |
-| `tests/browser-check.mjs` | 跑着的 dsh + Chromium | 真浏览器里验收界面 |
+| `tests/browser-check.mjs` | 跑着的 dsh + Chromium | 真浏览器里验收界面（0.2.2 起设置入口在左下角账号菜单 → 设置 → 模型） |
+| `tests/fusion-live.mjs` | 跑着的 dsh + Chromium | 门槛：展开的模型行里必须挂上结论行（含「自动匹配」或「无匹配」），否则退出 2 |
 | `tests/fusion-write.mjs` | 跑着的 dsh + Chromium | 真点一次「写入」，跑完把配置还原 |
 | `tests/new-route.mjs` | 跑着的 dsh + Chromium | 临时加一个网关，验证"新网关自动匹配"，跑完还原 |
 | `tests/live-refresh.mjs` | 联网（约 6 MB） | 真去 models.dev 拉一次，验证自动更新 |
@@ -254,7 +255,7 @@ LIVE_REFRESH_DEADLINE_MS=<毫秒>                         # tests/live-refresh.m
 ```
 lib/index.mjs            宿主端：按名字查目录、补元数据、提供界面数据、更新时机
 lib/names.mjs            模型名怎么读（裸名、宽松比较、后缀）的唯一实现
-lib/client.js            浏览器端：把两个开关放进模型行（用 DSH 自己的菜单组件）
+lib/client.js            浏览器端：把结论行（以及旧版 DSH 的两个开关）放进模型行（用 DSH 自己的菜单组件）
 lib/panel.mjs            界面数据与写入内容的纯函数
 lib/snapshot.mjs         models.dev 目录的下载与整理
 lib/refresh-snapshot.mjs 手动更新目录的 CLI
@@ -266,7 +267,8 @@ tests/harness.mjs        各套件共用的脚手架
 tests/unit.mjs           三个纯模块的套件
 tests/install-plugin.mjs 复制安装器的套件
 tests/wire-effort.mjs    网关真正收到的 reasoning.effort（没选等级时不许是 off）
-tests/cdp.mjs            三个浏览器工具共用的 CDP 驱动
+tests/cdp.mjs            浏览器工具共用的 CDP 驱动
+tests/fusion-live.mjs    「结论行必须挂上」的浏览器门槛（挂不上就退出 2）
 tests/snapshot-fixture.json  回归测试用的两条目录数据（让结果与当天数据无关）
 CHANGELOG.md             每个版本改了什么
 ```

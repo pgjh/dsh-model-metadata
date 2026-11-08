@@ -15,11 +15,34 @@
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { adapterEntry } from "../dev-paths.mjs";
+import { adapterEntry, nodeModulesDir } from "../dev-paths.mjs";
 import { quietLogger, sandbox, suite } from "./harness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN = join(HERE, "..", "lib/index.mjs");
+/*
+ * The numbers the added models must end up with belong to the catalogs that ship inside
+ * the installed DSH, not to this repository: pinning them made a DSH release (0.2.2 moved
+ * the official route's window to 1,048,576 and pi-ai's default to 1M) fail a suite whose
+ * subject — "an added model is enriched, without a restart" — had not changed. Read them
+ * from the same catalogs the plugin reads.
+ */
+const NODE_MODULES = nodeModulesDir();
+const OFFICIAL_ROWS = (await import(pathToFileURL(join(NODE_MODULES, "@deepseek-ai", "dsh-llm-deepseek", "lib", "index.js")).href)).resolveAdapterOptions({}).models;
+const officialContext = (id) => {
+	const row = OFFICIAL_ROWS.find((model) => model.id === id);
+	if (row === undefined) throw new Error(`the official route no longer lists ${id}; this suite's scenario needs a new one`);
+	return row.contextWindow;
+};
+const PI_AI_CATALOG = await import(pathToFileURL(join(NODE_MODULES, "@earendil-works", "pi-ai", "dist", "providers", "all.js")).href);
+const builtinRow = (route, id) => {
+	for (const candidate of PI_AI_CATALOG.getBuiltinProviders()) {
+		if (candidate !== route) continue;
+		const row = (PI_AI_CATALOG.getBuiltinModels(candidate) ?? []).find((model) => model.id === id);
+		if (row !== undefined) return row;
+	}
+	throw new Error(`the installed pi-ai catalog no longer carries ${route}/${id}; this suite's scenario needs a new one`);
+};
 
 /* A settings file the plugin can read (declarations win over matches). */
 const WORK = sandbox("hot-add");
@@ -103,10 +126,10 @@ const added2 = await show("added ", "probe/DeepSeek-V4-Pro");
 const kept = await show("kept  ", "probe/glm-5.3");
 
 const { expect, finish } = suite("hot add");
-expect("a model added at runtime is enriched without a restart", added1.contextWindow, 1000000);
+expect("a model added at runtime is enriched without a restart", added1.contextWindow, officialContext("deepseek-flash"));
 expect("its reasoning levels arrive with it", added1.efforts?.join("/"), "off/low/high/max");
-expect("a second added model (the official catalog's display name) is enriched too", added2.contextWindow, 1000000);
+expect("a second added model (the official catalog's display name) is enriched too", added2.contextWindow, officialContext("deepseek-v4-pro"));
 expect("and carries the official route's levels", added2.efforts?.join("/"), "off/low/high/max");
-expect("a model that was already there keeps its metadata", kept.contextWindow, 1000000);
+expect("a model that was already there keeps its metadata", kept.contextWindow, builtinRow("zai", "glm-5.3").contextWindow);
 WORK.clean();
 finish();

@@ -10,10 +10,24 @@
  *   node tests/browser-check.mjs --url "http://127.0.0.1:3080/?token=…"   # --card <provider> picks a card
  *   node tests/browser-check.mjs --out shot.png
  *
- * It opens the app, clicks 设置 → 模型, then prints: whether the panel's own
- * text is in the DOM, whether the bundle URL was fetched, every console message
- * and page error, and (with --out) a screenshot to look at. The verdict is the
- * exit code: 0 when the bundle was fetched and the fused cells mounted, 2 otherwise.
+ * DSH 0.2.2-rc.1 moved Settings out of the sidebar's 更多 menu into the
+ * bottom-left 账号菜单 popup, so the way in is: click button[aria-label="账号菜单"],
+ * click 设置 in that popup, wait for the role=dialog, then click 模型 in its nav.
+ *
+ * The models editor's rows changed shape too: the grid holding a row's 容量
+ * disclosure no longer starts with the id input (a drag handle now precedes it),
+ * so this tool identifies a row by the disclosure's own aria-label (模型选项 N),
+ * with "the toggle's grid holds a text input" as the build-independent fallback.
+ * A custom provider such as `cpa` keeps its rows behind the 自定义设置 summary,
+ * which is opened before the first row is expanded.
+ *
+ * It reports which navigation steps clicked, which provider cards were tried,
+ * how many rows each has, whether [data-model-metadata-cell] mounted, each
+ * cell's exact text and placement inside its modelEntry, DSH's own expanded-row
+ * controls (推理等级 / 输入类型), the bundle fetch, console/page errors, and
+ * (with --out) a screenshot. The verdict is the exit code: 0 only when the
+ * bundle was fetched, at least one cell mounted inside an expanded row, and its
+ * readout carries 自动匹配 / 无匹配 (Auto-matched / no match); 2 otherwise.
  *
  * The page is driven through the shared CDP helper (`tests/cdp.mjs`).
  */
@@ -32,192 +46,248 @@ const session = await openPage(url, {
 	profile: join(HERE, ".browser-profile"),
 	readyMs: 3000
 });
-const { send, evaluate, click, logs } = session;
+const { send, evaluate, logs, exceptions } = session;
 
-/* 0.2.1 moved Settings behind the sidebar's 更多 disclosure; older builds show it
- * directly. Try the visible entry first, then the disclosure. */
-let clickedSettings = await click("设置");
-if (!clickedSettings && (await click("更多"))) {
-	await sleep(500);
-	clickedSettings = await click("设置");
-}
-await sleep(1500);
-const clickedModels = await click("模型");
-await sleep(2500);
+/** Poll a page expression until it is true, without blocking this process. */
+const waitFor = async (expression, timeoutMs = 8000) => {
+	for (let elapsed = 0; elapsed <= timeoutMs; elapsed += 250) {
+		if ((await evaluate(expression)) === true) return true;
+		await sleep(250);
+	}
+	return false;
+};
 
-/* 1. This plugin must NOT render a block of its own: no second place to edit a
- * model. The card may carry one hint line, never a disclosure or its own fields. */
-const ownBlock = await evaluate(`(() => {
-	const cards = [...document.querySelectorAll("li")];
-	const withDisclosure = cards.filter((card) => [...card.querySelectorAll("summary")].some((node) => node.textContent.includes("目录回退"))).length;
-	const stray = [...document.querySelectorAll("[data-model-metadata-cell]")].length;
-	/* Nothing of this plugin's own may be visible while no editor is open: not a
-	 * disclosure, not a hint line, not a stray cell. */
-	const ownText = [...document.querySelectorAll("p, summary, span, div")]
-		.map((node) => node.children.length === 0 ? node.textContent.trim() : "")
-		.filter((text) => text.includes("目录回退") || text.includes("自定义设置 → 模型目录"));
-	return { withDisclosure, strayCellsWhileClosed: stray, ownTextWhileClosed: ownText };
+/** Click the one element whose aria-label is exactly `label`. */
+const clickAria = (label) => evaluate(`(() => {
+	const node = document.querySelector(${JSON.stringify(`[aria-label="${label}"]`)});
+	if (node === null) return false;
+	node.click();
+	return true;
 })()`);
 
-/* 2. Open the first provider card's editor and measure the fusion: every model row
- * must carry the two extra controls INSIDE that row, above its own capacity grid. */
-const fusion = await evaluate(`(async () => {
-	/* Empty unless asked: the first provider card of whatever deployment this runs
-	 * against, so the tool has no hardcoded provider name. */
-	const CARD = ${JSON.stringify(option("--card", ""))};
-	const wanted = CARD;
+/** Click the first button/menuitem/tab under `scope` whose trimmed text is exactly `wanted`. */
+const clickText = (scope, wanted) => evaluate(`(() => {
+	const root = ${scope} ?? document;
+	const node = [...root.querySelectorAll("button, [role=menuitem], [role=tab]")]
+		.find((candidate) => candidate.textContent.trim() === ${JSON.stringify(wanted)});
+	if (node === undefined) return false;
+	node.click();
+	return true;
+})()`);
+
+/* 1. Navigate the 0.2.2 way: account menu → 设置 → dialog → 模型. Every click is
+ * recorded, because "the tool could not get there" must not look like "the page
+ * has no cells". */
+const nav = { accountMenu: false, settings: false, dialog: false, models: false };
+nav.accountMenu = await clickAria("账号菜单");
+if (nav.accountMenu) await sleep(900);
+if (nav.accountMenu) {
+	/* The popup's item is a menu entry in this build; older/newer builds may
+	 * render it as a plain button, so fall back to the whole document. */
+	nav.settings = await clickText('document.querySelector(\'[role="menu"]\')', "设置");
+	if (!nav.settings) nav.settings = await clickText("document", "设置");
+}
+nav.dialog = nav.settings && await waitFor('document.querySelector(\'[role="dialog"]\') !== null', 10000);
+nav.models = nav.dialog && await clickText('document.querySelector(\'[role="dialog"]\')', "模型");
+await sleep(1800);
+
+const cardsReady = nav.models && await waitFor(
+	`[...document.querySelectorAll('[role="dialog"] li')].some((card) => [...card.querySelectorAll("button")].some((button) => button.textContent.trim() === "编辑"))`,
+	8000
+);
+
+/* 2. Open provider cards and measure the fusion: every model row must carry the
+ * plugin's cell INSIDE its own modelEntry, and DSH's native expanded controls
+ * must be visible next to it so the tool can tell the two apart. Nothing here is
+ * assumed to have mounted: the run reports 0 cells as a finding, not a crash. */
+/* Nothing of this plugin's may be on the page while no card editor is open: the
+ * seat renders cells INTO an open editor, never a block of its own. Reported rather
+ * than gated — the fusion result below is what this tool exists to prove. */
+const strayWhileClosed = await evaluate('document.querySelectorAll("[data-model-metadata-cell]").length');
+
+const scan = await evaluate(`(async () => {
 	const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-	/* Walk the cards until one carries this plugin's cells: a deployment's first card
-	 * may well be a provider of another family, so "the plugin's card" is what the
-	 * tool must find — not a name it was told. */
-	const cards = [...document.querySelectorAll("li")].filter((node) => [...node.querySelectorAll("button")].some((button) => button.textContent.trim() === "编辑"));
-	let card;
-	let used = "";
-	for (const candidate of cards.slice(0, 8)) {
-		if (wanted.length > 0 && !candidate.textContent.includes(wanted)) continue;
-		[...candidate.querySelectorAll("button")].find((node) => node.textContent.trim() === "编辑").click();
-		await sleep(1400);
-		const toggles = [...candidate.querySelectorAll("button[aria-expanded]")].filter((node) => node.parentElement?.children?.[0]?.tagName === "INPUT");
-		if (toggles[0] !== undefined) { toggles[0].click(); await sleep(500); }
-		if (candidate.querySelector("[data-model-metadata-cell]") !== null) { card = candidate; used = candidate.textContent.slice(0, 40).trim(); break; }
+	const ATTR = "data-model-metadata-cell";
+	const PREFERRED = ${JSON.stringify(option("--card", ""))};
+	const MAX_CARDS = ${JSON.stringify(Number(option("--cards", "6")))};
+	/* --all keeps scanning after the first card with cells, so an after-fix run can
+	 * report every provider's rows instead of stopping at the first match. */
+	const ALL = ${JSON.stringify(flag("--all"))};
+	const dialog = document.querySelector('[role="dialog"]') ?? document.body;
+	const cards = [...dialog.querySelectorAll("li")].filter((card) =>
+		[...card.querySelectorAll("button")].some((button) => button.textContent.trim() === "编辑"));
+	/* An optional --card substring moves the wanted card first; the deployment's
+	 * first card is often a provider family this plugin does not serve, and a
+	 * regression run should not depend on card order. */
+	const ordered = PREFERRED.length === 0
+		? cards
+		: [...cards].sort((a, b) => Number(b.textContent.includes(PREFERRED)) - Number(a.textContent.includes(PREFERRED)));
+	const isRowToggle = (toggle) => {
+		if (toggle.closest("[" + ATTR + "]") !== null) return false;
+		/* Our own pickers carry aria-expanded as well; the menu hint tells them apart. */
+		if (toggle.getAttribute("aria-haspopup") === "menu") return false;
+		if (/模型选项/u.test(toggle.getAttribute("aria-label") ?? "")) return true;
+		/* Fallback for a build without that label: the row's grid holds its id input. */
+		return toggle.parentElement?.querySelector("input") !== null;
+	};
+	const entryOf = (toggle) => toggle.closest("[class*=modelEntry]") ?? toggle.parentElement?.parentElement ?? null;
+	const describe = (node) => node === null || node === undefined
+		? null
+		: { tag: node.tagName.toLowerCase(), cls: String(node.className ?? "").slice(0, 80) };
+	const squash = (text) => String(text ?? "").replace(/\\s+/gu, " ").trim();
+	const results = [];
+	const list = ordered.slice(0, MAX_CARDS);
+	/* Remember the last expanded entry: with no cell to scroll to (the broken state),
+	 * that is what the --out screenshot should still show. */
+	let lastExpandedEntry = null;
+	for (let index = 0; index < list.length; index++) {
+		const card = list[index];
+		const result = {
+			label: squash(card.textContent).slice(0, 72),
+			rows: 0,
+			cellsBeforeExpand: 0,
+			expandedRows: 0,
+			cells: 0,
+			cellsInExpandedRow: 0,
+			readouts: [],
+			readoutsAll: [],
+			observed: [],
+			native: null,
+			errorBoundaryText: card.textContent.includes("此行的元数据控件加载失败"),
+			closed: false
+		};
+		const edit = [...card.querySelectorAll("button")].find((button) => button.textContent.trim() === "编辑");
+		if (edit === undefined) { result.skipped = "no 编辑 button"; results.push(result); continue; }
+		edit.click();
+		await sleep(1500);
+		/* A custom provider (cpa, for one) keeps its model rows behind 自定义设置. */
+		const summary = [...card.querySelectorAll("summary")].find((node) => node.textContent.includes("自定义设置"));
+		if (summary !== undefined && summary.parentElement?.open !== true) {
+			summary.click();
+			await sleep(1400);
+		}
+		await sleep(300);
+		let toggles = [...card.querySelectorAll("button[aria-expanded]")].filter(isRowToggle);
+		result.rows = toggles.length;
+		result.cellsBeforeExpand = card.querySelectorAll("[" + ATTR + "]").length;
+		/* Rows are collapsed by default: open the first one so its own advanced grid
+		 * (上下文窗口 / 最大输出 token 数 / 输入类型 …) is on the page next to the cell. */
+		if (toggles[0] !== undefined) {
+			toggles[0].click();
+			await sleep(1000);
+		}
+		toggles = [...card.querySelectorAll("button[aria-expanded]")].filter(isRowToggle);
+		const expanded = toggles.filter((toggle) => toggle.getAttribute("aria-expanded") === "true");
+		result.expandedRows = expanded.length;
+		result.cells = card.querySelectorAll("[" + ATTR + "]").length;
+		const expandedEntry = expanded[0] === undefined ? null : entryOf(expanded[0]);
+		lastExpandedEntry = expandedEntry ?? lastExpandedEntry;
+		if (expandedEntry !== null) result.cellsInExpandedRow = expandedEntry.querySelectorAll("[" + ATTR + "]").length;
+		const advanced = expandedEntry?.querySelector("[class*=modelAdvanced]") ?? null;
+		result.native = {
+			advancedText: advanced === null ? null : squash(advanced.textContent).slice(0, 400),
+			hasReasoning: advanced === null ? null : /推理等级/u.test(advanced.textContent),
+			hasInputType: advanced === null ? null : /输入类型/u.test(advanced.textContent)
+		};
+		result.observed = [...card.querySelectorAll("[" + ATTR + "]")].slice(0, 3).map((cell) => {
+			const entry = cell.closest("[class*=modelEntry]") ?? cell.parentElement;
+			const children = entry === null ? [] : [...entry.children];
+			const kinds = children.map((node) =>
+				node.hasAttribute(ATTR) ? "cell"
+					: node.querySelector("button[aria-expanded]") !== null ? "row"
+						: "other");
+			const ownLabel = (node) => node.getAttribute("aria-label") ?? null;
+			/* The row grid inside its entry: the child that is not our cell and holds a
+			 * disclosure button. Its first text input is the row's id (0.2.2 wraps both
+			 * inputs in <label>s, so the id attribute is not guaranteed). */
+			const rowGrid = children.find((node) => !node.hasAttribute(ATTR) && node.querySelector("button[aria-expanded]") !== null) ?? null;
+			return {
+				/* The readout-only cell (0.2.2+) draws a plain <p>; the picker cell draws one with
+				 * role=status. Either is the readout this tool reports. */
+				readout: (cell.querySelector('p[role="status"]') ?? cell.querySelector("p"))?.textContent ?? null,
+				text: squash(cell.textContent).slice(0, 240),
+				captions: [...cell.querySelectorAll("span")].map(squash).filter((text) => text.length > 0 && text.length < 24).slice(0, 6),
+				pickers: cell.querySelectorAll('button[aria-haspopup="menu"]').length,
+				buttons: cell.querySelectorAll("button").length,
+				inputs: cell.querySelectorAll("input, select").length,
+				placement: {
+					parent: describe(cell.parentElement),
+					entry: describe(entry),
+					entryChildren: kinds,
+					cellIndex: children.indexOf(cell)
+				},
+				row: {
+					id: (rowGrid?.querySelector('input[id]') ?? rowGrid?.querySelector('input[type="text"]'))?.value ?? null,
+					expanded: expandedEntry !== null && entry === expandedEntry,
+					toggleAria: expanded[0] === undefined ? null : ownLabel(expanded[0])
+				}
+			};
+		});
+		result.readouts = result.observed.map((cell) => squash(cell.readout)).filter((text) => text.length > 0);
+		/* Every row's readout, not only the three described above: a row whose name no
+		 * catalog knows must still be visible as 无匹配 in the report. */
+		result.readoutsAll = [...card.querySelectorAll("[" + ATTR + "]")]
+			.map((cell) => squash(cell.textContent)).filter((text) => text.length > 0).slice(0, 16);
+		/* Keep a card only if it produced cells; otherwise close its editor before the
+		 * next card so two editors cannot confuse the row search — except the last one,
+		 * which stays open so the screenshot shows the row the tool measured. --all
+		 * deliberately leaves every editor open to report all cards. */
+		if (result.cells > 0 && !ALL) { results.push(result); break; }
+		if (result.cells === 0 && index < list.length - 1) {
+			const cancel = [...card.querySelectorAll("button")].find((button) => button.textContent.trim() === "取消");
+			if (cancel !== undefined) { cancel.click(); await sleep(700); result.closed = true; }
+		}
+		results.push(result);
 	}
-	if (card === undefined) return { opened: false, cardsTried: cards.length };
-	await sleep(600);
-	/* A model row is the grid whose first cell is the id input; its 容量 toggle is the
-	 * only aria-expanded button there. Our own triggers must not add to this count. */
-	/* Already expanded inside the search loop above — toggling here would collapse it. */
-	const toggles = [...card.querySelectorAll("button[aria-expanded]")].filter((node) => node.parentElement?.children?.[0]?.tagName === "INPUT");
-	const cells = [...card.querySelectorAll("[data-model-metadata-cell]")];
-	const rowOf = (node) => node.closest("li") === card;
-	const entryOf = (toggle) => toggle.parentElement.parentElement;
-	const insideEntry = cells.filter((cell) => toggles.some((toggle) => entryOf(toggle) === cell.parentElement)).length;
-	const first = cells[0];
-	const entry = first?.parentElement;
-	const order = entry === undefined ? undefined : [...entry.children].map((node) => node.hasAttribute("data-model-metadata-cell") ? "cell" : node.querySelector("button[aria-expanded]") !== null ? "row" : "capacity");
-	const labelled = first === undefined ? [] : [...first.querySelectorAll(":scope > div > span")].map((node) => node.textContent);
-	const controls = first === undefined ? 0 : first.querySelectorAll("input, select").length;
-	const edge = card.getBoundingClientRect();
-	const overflowing = cells.flatMap((cell) => [...cell.querySelectorAll("input, select")]).filter((node) => { const box = node.getBoundingClientRect(); return box.width > 0 && box.right > edge.right + 1; }).length;
 	return {
-		opened: true,
-		rows: toggles.length,
-		cells: cells.length,
-		cellsInsideTheirOwnRow: insideEntry,
-		entryOrder: order,
-		labels: labelled,
-		controlsPerCell: controls,
-		readout: first?.querySelector("div span")?.textContent,
-		/* Look, not just position: the injected controls must be indistinguishable
-		 * from the row's own 容量 fields, so compare computed styles directly. */
-		styleParity: (() => {
-			if (first === undefined || entry === undefined) return undefined;
-			/* Ours is the Menu trigger (there is no platform control any more); theirs is
-			 * the row's own 容量 input, the widget this one must be indistinguishable from. */
-			const theirs = entry.querySelector('input[inputMode="numeric"]') ?? entry.querySelector("input");
-			const mine = first.querySelector("button[aria-haspopup='menu']");
-			const theirLabel = theirs?.closest("label")?.querySelector("span") ?? null;
-			const myLabel = first.querySelector("span");
-			if (!(theirs instanceof Element) || !(mine instanceof Element)) return { sameBox: undefined, reason: "the row's own capacity grid is not expanded" };
-			const pick = (node) => {
-				if (!(node instanceof Element)) return undefined;
-				const computed = getComputedStyle(node);
-				return [computed.height, computed.fontSize, computed.borderRadius, computed.borderTopWidth, computed.paddingLeft, computed.color, computed.backgroundColor].join("|");
-			};
-			const theirLabelStyle = theirLabel instanceof Element ? getComputedStyle(theirLabel) : undefined;
-			const myLabelStyle = myLabel instanceof Element ? getComputedStyle(myLabel) : undefined;
-			return {
-				sameBox: pick(theirs) === pick(mine),
-				theirBox: pick(theirs),
-				myBox: pick(mine),
-				labelSame: theirLabelStyle !== undefined && myLabelStyle !== undefined && theirLabelStyle.fontSize === myLabelStyle.fontSize && theirLabelStyle.color === myLabelStyle.color,
-				gap: getComputedStyle(first).gap,
-				gridColumns: getComputedStyle(first).gridTemplateColumns
-			};
-		})(),
-		overflowingControls: overflowing,
-		/* Exactly ONE caret per picker: the trigger draws DSH's chevron as a child, and
-		 * must not also inherit one as a background image from a copied class — that
-		 * combination is what showed two arrows until the select class stopped being
-		 * merged into the trigger. */
-		carets: (() => {
-			const trigger = first?.querySelector("button[aria-haspopup='menu']");
-			if (!(trigger instanceof Element)) return undefined;
-			const computed = getComputedStyle(trigger);
-			return {
-				chevronChildren: trigger.querySelectorAll("svg").length,
-				backgroundImage: computed.backgroundImage,
-				paddingRight: computed.paddingRight,
-				className: trigger.className
-			};
-		})(),
-		stillInCard: rowOf(card),
-		card: used,
-		/* The pickers must be DSH's own in-page Menu, never the platform's sheet. */
-		popup: await (async () => {
-			const trigger = first?.querySelector("button[aria-haspopup='menu']");
-			if (trigger === undefined) return undefined;
-			const visible = (node) => node.offsetParent !== null;
-			/* DSH's Menu does not use an ARIA menu role on its surface, and the popup is
-			 * portaled out of the card, so the honest probe is "which buttons appeared
-			 * after the click". Comparing before/after also excludes the page's own. */
-			const before = new Set([...document.querySelectorAll("button")].map((node) => node.textContent.trim()));
-			trigger.click();
-			await new Promise((resolve) => setTimeout(resolve, 500));
-			const appeared = [...document.querySelectorAll("button")]
-				.filter((node) => visible(node) && !before.has(node.textContent.trim()))
-				.map((node) => node.textContent.trim())
-				.filter((text) => text.length > 0);
-			const shot = {
-				triggerText: trigger.textContent.trim(),
-				items: appeared.length,
-				itemTexts: appeared.slice(0, 8)
-			};
-			document.body.click();
-			return shot;
+		cardsFound: cards.length,
+		preferred: PREFERRED,
+		cards: results,
+		/* Scroll the first cell into view so the --out screenshot actually shows the
+		 * readout instead of the top of a long card; fall back to the expanded row. */
+		scrolled: (() => {
+			const target = dialog.querySelector("[" + ATTR + "]") ?? lastExpandedEntry;
+			if (target === null) return false;
+			target.scrollIntoView({ block: "center" });
+			return true;
 		})()
 	};
 })()`);
 
-/* `--edit`: enumerate what the shipped editor itself offers, so "which control
- * belongs to whom" is answered from the DOM rather than the source map. This is
- * how the capacity duplication was found: 编辑 → 自定义设置 → 模型目录 → each
- * row's 容量 grid already owns 上下文窗口 and 最大输出 token. */
-let editor;
-if (flag("--edit")) {
-	editor = await evaluate(`(() => {
-		const cards = [...document.querySelectorAll("li")];
-		const card = cards.find((node) => [...node.querySelectorAll("button")].some((b) => b.textContent.trim() === "取消" || b.textContent.trim() === "保存"));
-		if (card === undefined) return { opened: false };
-		return {
-			opened: true,
-			details: [...card.querySelectorAll("details")].map((node) => node.querySelector("summary")?.textContent.trim()),
-			labels: [...card.querySelectorAll("span")].map((node) => node.textContent.trim()).filter((text) => text.length > 0 && text.length < 20),
-			controls: [...card.querySelectorAll("input, select")].map((node) => ({ aria: node.getAttribute("aria-label"), placeholder: node.getAttribute("placeholder") })).slice(-6)
-		};
-	})()`);
-}
-
-/* Name-agnostic on purpose: the aggregate bundle URL carries the package name, and a
- * hardcoded one silently stopped matching the moment the package was renamed. */
+/* 3. What the page loaded: the aggregate plugin bundle must carry this package's
+ * client.js, and the failure boundary must not be on the page. The resource
+ * filter is name-agnostic (the package name comes from package.json) because a
+ * hardcoded one stops matching the moment the package is renamed. */
 const manifest = JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"));
-const aggregate = await evaluate("performance.getEntriesByType('resource').map((entry) => entry.name).filter((name) => name.includes('plugins/??')).map((name) => name.split('&rev=')[0])");
-/* No leading slash: after `??` the first id has none. */
-const resources = aggregate.filter((url) => url.includes(`${manifest.name}/client.js`));
+const resources = await evaluate("performance.getEntriesByType('resource').map((entry) => entry.name)");
+const bundleFetched = resources.filter((name) => name.includes(`${manifest.name}/client.js`));
+const aggregate = resources.filter((name) => name.includes("??"));
 const body = await evaluate("document.body.innerText");
+const cells = (scan?.cards ?? []).flatMap((card) => card.observed);
+const allReadoutTexts = (scan?.cards ?? []).flatMap((card) => card.readoutsAll ?? []);
+const readoutOk = allReadoutTexts.some((text) => /自动匹配|无匹配|Auto-matched/iu.test(text));
+const cardsWithCells = (scan?.cards ?? []).filter((card) => card.cellsInExpandedRow > 0);
+
 const report = {
 	url,
-	clicked: { settings: clickedSettings, models: clickedModels },
-	bundleFetched: resources,
-	aggregateBundle: aggregate.map((url) => url.split("??").at(-1)?.split(",").filter((id) => id.includes("client.js") && !id.startsWith("@deepseek-ai")).join(",") ?? url),
-	ownBlock,
-	fusion,
-	editor,
-	/* With no editor open this plugin shows nothing at all, so "is it alive?" is
-	 * answered by the bundle fetch and the cells it mounts, not by its own text. */
-	ownTextPresent: body.includes("目录回退"),
-	cellsMounted: fusion?.cells ?? 0,
-	bodyHead: body.slice(0, 1200),
-	logs: logs.filter((line) => /catalog|model-metadata|slots|Cannot|Error|error/u.test(line)).slice(0, 40),
+	nav: { clicked: nav, cardsReady },
+	scan,
+	bundle: {
+		fetched: bundleFetched,
+		aggregate: aggregate.map((name) => name.split("??").at(-1) ?? name),
+		pluginResourceCount: resources.filter((name) => name.includes("plugins/")).length
+	},
+	cells: {
+		strayWhileClosed,
+		rowsWithCells: cardsWithCells.length,
+		mountedInExpandedRow: cardsWithCells.reduce((total, card) => total + card.cellsInExpandedRow, 0),
+		observed: cells,
+		readoutTexts: allReadoutTexts,
+		readoutOk
+	},
+	errorBoundaryText: body.includes("此行的元数据控件加载失败"),
+	pageExceptions: exceptions.slice(0, 10),
+	logs: logs.map((line) => line.replace(/\s+/gu, " ").slice(0, 500)).slice(0, 60),
 	logCount: logs.length
 };
 
@@ -229,15 +299,17 @@ if (out !== undefined) {
 
 console.log(JSON.stringify(report, null, 2));
 const noise = session.chromeErrors();
-if (noise.trim().length > 0 && report.cellsMounted === 0) console.log(`chromium stderr:\n${noise.split("\n").slice(-8).join("\n")}`);
+if (noise.trim().length > 0 && !readoutOk) console.log(`chromium stderr:\n${noise.split("\n").slice(-8).join("\n")}`);
 session.close();
 /*
- * The verdict, said in the exit code as well as in the JSON: a run where the bundle was
- * never fetched or no fused cell mounted has found the regression this tool exists for,
- * and an exit status of 0 would report it as a success to whoever called the tool.
+ * The verdict, said in the exit code as well as in the JSON: a run where the
+ * bundle was never fetched, no fused cell mounted, or the cell carries no
+ * readout has found the regression this tool exists for, and an exit status of 0
+ * would report it as a success to whoever called the tool.
  */
-const proved = report.bundleFetched.length > 0 && report.cellsMounted > 0;
+const mounted = report.cells.mountedInExpandedRow;
+const proved = report.bundle.fetched.length > 0 && mounted > 0 && readoutOk;
 console.log(proved
-	? `VERDICT ok: ${String(report.cellsMounted)} fused cell(s) mounted, the client bundle was fetched`
-	: `VERDICT negative: ${String(report.bundleFetched.length)} bundle fetch(es), ${String(report.cellsMounted)} fused cell(s)`);
+	? `VERDICT ok: ${String(mounted)} fused cell(s) mounted in an expanded row, readout ${allReadoutTexts.filter((text) => /自动匹配|无匹配|Auto-matched/iu.test(text)).slice(0, 4).map((text) => `"${text}"`).join(" | ")}`
+	: `VERDICT negative: ${String(report.bundle.fetched.length)} bundle fetch(es), ${String(mounted)} cell(s) in an expanded row, readout ${readoutOk ? "present" : "missing"}`);
 if (!proved) process.exitCode = 2;

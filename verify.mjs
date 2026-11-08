@@ -202,7 +202,15 @@ function officialInput(id) {
  * assertion is what would catch that.)
  */
 const baseline = run(["--source", ADAPTER, "--node-modules", NODE_MODULES]);
-expect("baseline: prefixed model falls back to the route defaults", rowOf(baseline, "probe/glm-5.3").contextWindow, 262144);
+/*
+ * The fallback the pristine adapter reports is pi-ai's own number for a route that
+ * declares no capacity — not this plugin's — so it is read here rather than pinned as a
+ * literal (DSH 0.2.2 moved it from 256K to 1M, which turned a literal into a failure
+ * with no change in this repository). The value is the reference the later assertions
+ * use for "the plugin left the default alone".
+ */
+const ROUTE_DEFAULT = rowOf(baseline, "probe/glm-5.3").contextWindow;
+expect("baseline: prefixed model falls back to the route defaults", Number.isInteger(ROUTE_DEFAULT) && ROUTE_DEFAULT > 0, true);
 expect("baseline: no reasoning levels offered", rowOf(baseline, "probe/glm-5.3").reasoning, []);
 
 /* Scenario 2: the plugin against the untouched install. */
@@ -253,7 +261,7 @@ expect("plugin: the models.dev tier covers a model no bundled catalog has", rowO
  */
 expect("plugin: a catalog route outranks the aggregator for the same name", rowOf(plugin, "probe/longcat-2.0").contextWindow, catalogRow("openrouter", "meituan/longcat-2.0").contextWindow);
 expect("plugin: and it is not the aggregator's row that answered", catalogRow("openrouter", "meituan/longcat-2.0").contextWindow === catalogRow("opencode-go", "longcat-2.0").contextWindow, false);
-expect("plugin: a model nothing describes keeps the route default", rowOf(plugin, "probe/unknown-model-x").contextWindow, 262144);
+expect("plugin: a model nothing describes keeps the route default", rowOf(plugin, "probe/unknown-model-x").contextWindow, ROUTE_DEFAULT);
 expect("plugin: a model nothing describes offers no levels", rowOf(plugin, "probe/unknown-model-x").reasoning, []);
 /*
  * Hy/hunyuan has no vendor route of its own — only opencode-go carries it — so
@@ -351,7 +359,7 @@ expect("models.dev: a chat row outranks a non-chat row of the same name", rowOf(
  * and resolved to a documented one.
  */
 const disabled = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK: "off" });
-expect("fallback=off: the route default is left alone", rowOf(disabled, "probe/glm-5.3").contextWindow, 262144);
+expect("fallback=off: the route default is left alone", rowOf(disabled, "probe/glm-5.3").contextWindow, ROUTE_DEFAULT);
 expect("fallback=off: and no levels are offered", rowOf(disabled, "probe/glm-5.3").reasoning, []);
 const contextOnly = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK: "context" });
 expect("fallback=context: capacities are still filled in", rowOf(contextOnly, "probe/glm-5.3").contextWindow, catalogRow("zai", "glm-5.3").contextWindow);
